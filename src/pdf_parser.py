@@ -2,8 +2,9 @@
 PDF-Parser für deutsche Gesellschafterlisten.
 
 Unterstützt verschiedene Formate je nach Amtsgericht:
-- Tabellen-basierte Extraktion (bevorzugt)
-- Regex-basierte Extraktion (Fallback)
+- PDF: Tabellen-basierte Extraktion (bevorzugt)
+- PDF: Regex-basierte Extraktion (Fallback)
+- TIF/TIFF: OCR mit Tesseract (für ältere Scans)
 """
 
 import re
@@ -13,6 +14,22 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 import pdfplumber
+
+# OCR-Unterstützung für TIF-Dateien
+try:
+    import pytesseract
+    from PIL import Image
+    OCR_AVAILABLE = True
+
+    # Windows: Tesseract-Pfad konfigurieren
+    import platform
+    if platform.system() == 'Windows':
+        tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        import os
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+except ImportError:
+    OCR_AVAILABLE = False
 
 from models import Shareholder
 
@@ -78,21 +95,42 @@ class GesellschafterlisteParser:
     NON_PERSON_MARKERS = [
         "Geschäftsanteil", "Stammkapital", "Nennbetrag", "laufende",
         "Nummer", "Betrag", "Liste", "Gesellschafter", "insgesamt",
-        "Summe", "EUR", "Anteil", "Veränderung"
+        "Summe", "EUR", "Anteil", "Veränderung", "Amtsgericht",
+        "Registergericht", "Unterschrift", "Datum", "Liquidator",
+        "Geschäftsführer", "Vorname", "Geburtsdatum", "Wohnort",
+        "Rechtsform", "Name", "Sitz", "elektronisch"
     ]
 
-    def parse(self, pdf_path: Path) -> ParsingResult:
+    # OCR-spezifische Patterns (für gescannte Dokumente)
+    OCR_PATTERNS = {
+        # Format: "Nachname Vorname DD.MM.YYYY Ort"
+        "ocr_name_date_place": re.compile(
+            r"([A-ZÄÖÜ][a-zäöüß]+)\s+([A-ZÄÖÜ][a-zäöüß]+)\s+(\d{2}\.\d{2}\.\d{4})\s+([A-ZÄÖÜ][a-zäöüß]+)",
+            re.MULTILINE
+        ),
+        # Format: "Nachname Vorname DD.MM.YYYY"
+        "ocr_name_date": re.compile(
+            r"([A-ZÄÖÜ][a-zäöüß]+)\s+([A-ZÄÖÜ][a-zäöüß]+)\s+(\d{2}\.\d{2}\.\d{4})",
+            re.MULTILINE
+        ),
+    }
+
+    def parse(self, file_path: Path) -> ParsingResult:
         """
         Parst Gesellschafterliste und extrahiert Gesellschafter.
 
+        Unterstützt:
+        - PDF-Dateien (mit pdfplumber)
+        - TIF/TIFF-Dateien (mit OCR via pytesseract)
+
         Args:
-            pdf_path: Pfad zur PDF-Datei
+            file_path: Pfad zur PDF- oder TIF-Datei
 
         Returns:
             ParsingResult mit Gesellschaftern und Statistiken
         """
-        if not pdf_path.exists():
-            logger.warning(f"PDF nicht gefunden: {pdf_path}")
+        if not file_path.exists():
+            logger.warning(f"Datei nicht gefunden: {file_path}")
             return ParsingResult(
                 shareholders=[],
                 natural_persons_count=0,
@@ -102,28 +140,48 @@ class GesellschafterlisteParser:
 
         shareholders = []
         full_text = ""
+        file_ext = file_path.suffix.lower()
 
         try:
-            with pdfplumber.open(pdf_path) as pdf:
-                # Text extrahieren
-                full_text = "\n".join(
-                    page.extract_text() or "" for page in pdf.pages
+            # TIF/TIFF-Dateien mit OCR verarbeiten
+            if file_ext in ['.tif', '.tiff']:
+                full_text = self._extract_text_from_tif(file_path)
+                if full_text:
+                    shareholders = self._parse_with_patterns(full_text)
+                else:
+                    logger.warning(f"Kein Text aus TIF extrahiert: {file_path}")
+
+            # PDF-Dateien mit pdfplumber
+            elif file_ext == '.pdf':
+                with pdfplumber.open(file_path) as pdf:
+                    # Text extrahieren
+                    full_text = "\n".join(
+                        page.extract_text() or "" for page in pdf.pages
+                    )
+
+                    # 1. Versuch: Tabellen-Extraktion
+                    for page in pdf.pages:
+                        tables = page.extract_tables()
+                        for table in tables:
+                            if table:
+                                extracted = self._parse_table(table)
+                                shareholders.extend(extracted)
+
+                    # 2. Versuch: Regex-Extraktion falls Tabellen leer
+                    if not shareholders:
+                        shareholders = self._parse_with_patterns(full_text)
+
+            else:
+                logger.warning(f"Unbekanntes Dateiformat: {file_ext}")
+                return ParsingResult(
+                    shareholders=[],
+                    natural_persons_count=0,
+                    legal_entities_count=0,
+                    confidence=0.0
                 )
 
-                # 1. Versuch: Tabellen-Extraktion
-                for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
-                        if table:
-                            extracted = self._parse_table(table)
-                            shareholders.extend(extracted)
-
-                # 2. Versuch: Regex-Extraktion falls Tabellen leer
-                if not shareholders:
-                    shareholders = self._parse_with_patterns(full_text)
-
         except Exception as e:
-            logger.error(f"Fehler beim Parsen von {pdf_path}: {e}")
+            logger.error(f"Fehler beim Parsen von {file_path}: {e}")
             return ParsingResult(
                 shareholders=[],
                 natural_persons_count=0,
@@ -145,7 +203,7 @@ class GesellschafterlisteParser:
         confidence = self._calculate_confidence(shareholders, full_text)
 
         logger.info(
-            f"Parsed {pdf_path.name}: {len(natural)} natürlich, "
+            f"Parsed {file_path.name}: {len(natural)} natürlich, "
             f"{len(legal)} juristisch, Konfidenz: {confidence:.2f}"
         )
 
@@ -156,6 +214,56 @@ class GesellschafterlisteParser:
             confidence=confidence,
             raw_text=full_text
         )
+
+    def _extract_text_from_tif(self, tif_path: Path) -> str:
+        """
+        Extrahiert Text aus TIF-Datei mittels OCR (Tesseract).
+
+        Args:
+            tif_path: Pfad zur TIF-Datei
+
+        Returns:
+            Extrahierter Text oder leerer String bei Fehler
+        """
+        if not OCR_AVAILABLE:
+            logger.error(
+                "OCR nicht verfügbar. Bitte installieren:\n"
+                "  1. Tesseract: https://github.com/tesseract-ocr/tesseract\n"
+                "     Windows: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "  2. pip install pytesseract Pillow"
+            )
+            return ""
+
+        try:
+            # Bild laden
+            image = Image.open(tif_path)
+
+            # OCR mit deutscher Sprache (falls verfügbar)
+            # Tesseract-Konfiguration für bessere Erkennung
+            custom_config = r'--oem 3 --psm 6'
+
+            try:
+                # Versuche zuerst mit Deutsch
+                text = pytesseract.image_to_string(
+                    image,
+                    lang='deu',
+                    config=custom_config
+                )
+            except pytesseract.TesseractError:
+                # Fallback auf Englisch wenn Deutsch nicht installiert
+                logger.warning("Deutsches Sprachpaket nicht verfügbar, nutze Englisch")
+                text = pytesseract.image_to_string(
+                    image,
+                    lang='eng',
+                    config=custom_config
+                )
+
+            logger.info(f"OCR extrahiert {len(text)} Zeichen aus {tif_path.name}")
+            return text
+
+        except Exception as e:
+            logger.error(f"OCR-Fehler für {tif_path}: {e}")
+            return ""
 
     def _parse_table(self, table: List[List]) -> List[Shareholder]:
         """Extrahiert Gesellschafter aus Tabellen-Struktur."""
@@ -217,6 +325,7 @@ class GesellschafterlisteParser:
         """Regex-basierte Extraktion als Fallback."""
         shareholders = []
 
+        # Standard-Patterns
         for pattern_name, pattern in self.PATTERNS.items():
             matches = pattern.findall(text)
 
@@ -242,6 +351,35 @@ class GesellschafterlisteParser:
                 shareholders.append(Shareholder(
                     name=name,
                     source=f"regex:{pattern_name}"
+                ))
+
+        # OCR-spezifische Patterns (für gescannte Dokumente)
+        for pattern_name, pattern in self.OCR_PATTERNS.items():
+            matches = pattern.findall(text)
+
+            for match in matches:
+                if pattern_name == "ocr_name_date_place":
+                    # Nachname, Vorname, Datum, Ort -> "Vorname Nachname"
+                    nachname, vorname, datum, ort = match
+                    name = f"{vorname} {nachname}"
+                elif pattern_name == "ocr_name_date":
+                    # Nachname, Vorname, Datum -> "Vorname Nachname"
+                    nachname, vorname, datum = match
+                    name = f"{vorname} {nachname}"
+                else:
+                    continue
+
+                name = self._clean_name(name)
+
+                # Validierung
+                if len(name) < 3:
+                    continue
+                if any(marker.lower() in name.lower() for marker in self.NON_PERSON_MARKERS):
+                    continue
+
+                shareholders.append(Shareholder(
+                    name=name,
+                    source=f"ocr:{pattern_name}"
                 ))
 
         return shareholders

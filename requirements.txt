@@ -7,3 +7,7 @@ python-dotenv>=1.0.0
 tqdm>=4.66.0
 pandas>=2.0.0
 openpyxl>=3.1.0
+
+# OCR für TIF-Scans
+pytesseract>=0.3.10
+Pillow>=10.0.0
