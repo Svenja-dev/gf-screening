@@ -620,46 +620,80 @@ class GesellschafterlistenDownloader:
 
         Diese Methode wird aufgerufen, nachdem wir auf der "Freigegebene Dokumente"
         Seite gelandet sind.
+
+        Die Dokumentenstruktur auf handelsregister.de:
+        - "Dokumente zum Rechtsträger" -> Hier sind die Gesellschafterlisten!
+          - Liste der Gesellschafter (ggf. mehrere mit Datum)
+        - "Dokumente zur Registernummer" -> Meist nur Sammelmappe
         """
         try:
             # Aktuelle Dateien merken
             existing_files = set(self.download_dir.glob("*.*"))
             safe_name = register_num.replace(" ", "_").replace("/", "-")
 
-            # 1. Dokumentenbaum expandieren (alle Toggler klicken)
+            # 1. Dokumentenbaum expandieren - WICHTIG: "Dokumente zum Rechtsträger"!
+            logger.info("Expandiere Dokumentenbaum...")
             self._expand_all_tree_nodes()
-            time.sleep(1)
+            time.sleep(random.uniform(2, 3))
+            self._save_debug_screenshot("tree_expanded")
 
             # 2. Nach "Gesellschafterliste" oder "Liste der Gesellschafter" suchen
             gl_patterns = [
                 "Liste der Gesellschafter",
                 "Gesellschafterliste",
                 "Gesellschafter-Liste",
+                "GL ",  # Abkürzung
             ]
 
             gl_found = False
+            gl_element = None
+
+            # Zuerst alle sichtbaren Elemente mit dem Suchtext sammeln
             for pattern in gl_patterns:
                 try:
-                    # Suche nach dem Text im Dokumentenbaum
-                    gl_elements = self.driver.find_elements(
-                        By.XPATH,
-                        f"//*[contains(text(), '{pattern}')]"
-                    )
+                    # Verschiedene XPath-Varianten probieren
+                    xpaths = [
+                        f"//*[contains(text(), '{pattern}')]",
+                        f"//span[contains(text(), '{pattern}')]",
+                        f"//a[contains(text(), '{pattern}')]",
+                        f"//td[contains(text(), '{pattern}')]",
+                        f"//div[contains(text(), '{pattern}')]",
+                    ]
 
-                    for el in gl_elements:
-                        try:
-                            if not el.is_displayed():
+                    for xpath in xpaths:
+                        gl_elements = self.driver.find_elements(By.XPATH, xpath)
+
+                        for el in gl_elements:
+                            try:
+                                if not el.is_displayed():
+                                    continue
+
+                                # Element gefunden - jetzt richtig auswählen
+                                logger.info(f"Gesellschafterliste gefunden: '{el.text[:50]}'")
+
+                                # In der Baum-Struktur muss man oft den Parent-Knoten klicken
+                                # um das Dokument auszuwählen
+                                try:
+                                    # Versuche den Tree-Node-Content zu finden
+                                    treenode = el.find_element(By.XPATH,
+                                        "./ancestor::*[contains(@class, 'treenode') or contains(@class, 'tree-node')][1]")
+                                    content = treenode.find_element(By.CSS_SELECTOR,
+                                        ".ui-treenode-content, .tree-content, *")
+                                    self.driver.execute_script("arguments[0].click();", content)
+                                except:
+                                    # Direkter Klick auf das Element
+                                    self.driver.execute_script("arguments[0].click();", el)
+
+                                gl_found = True
+                                gl_element = el
+                                time.sleep(random.uniform(1, 2))
+                                break
+                            except Exception as e:
+                                logger.debug(f"Klick auf GL-Element fehlgeschlagen: {e}")
                                 continue
 
-                            # Klicken um das Dokument auszuwählen
-                            self.driver.execute_script("arguments[0].click();", el)
-                            logger.info(f"Gesellschafterliste gefunden: '{pattern}'")
-                            gl_found = True
-                            time.sleep(random.uniform(1, 2))
+                        if gl_found:
                             break
-                        except Exception:
-                            continue
-
                     if gl_found:
                         break
                 except Exception:
@@ -669,30 +703,72 @@ class GesellschafterlistenDownloader:
                 logger.warning("Keine Gesellschafterliste im Dokumentenbaum gefunden")
                 # Screenshot für Debugging
                 self._save_debug_screenshot("no_gl_in_tree")
+
+                # Letzte Chance: Prüfen ob "Dokumente zum Rechtsträger" expandiert wurde
+                page_source = self.driver.page_source
+                if "Dokumente zum Rechtsträger" in page_source:
+                    if "Liste der Gesellschafter" not in page_source:
+                        logger.warning("'Dokumente zum Rechtsträger' sichtbar, aber keine GL - vielleicht nicht expandiert?")
+                        # Nochmal versuchen zu expandieren
+                        self._expand_all_tree_nodes()
+                        time.sleep(2)
+                        self._save_debug_screenshot("retry_expand")
+                    else:
+                        logger.info("GL-Text ist auf der Seite, aber Element nicht klickbar")
+                else:
+                    logger.warning("'Dokumente zum Rechtsträger' nicht auf Seite - falscher Dokumententyp?")
+
                 return None
 
             # 3. Download-Button klicken
-            time.sleep(1)
+            time.sleep(random.uniform(1, 2))
             self._save_debug_screenshot("gl_selected")
 
-            download_buttons = self.driver.find_elements(
-                By.XPATH,
-                "//button[contains(text(), 'Download')] | "
-                "//a[contains(text(), 'Download')] | "
-                "//input[@value='Download'] | "
-                "//*[contains(@class, 'download')]"
-            )
+            # Verschiedene Download-Button-Selektoren
+            download_selectors = [
+                "//button[contains(text(), 'Download')]",
+                "//a[contains(text(), 'Download')]",
+                "//input[@value='Download']",
+                "//*[contains(@class, 'download')]",
+                "//button[contains(@class, 'btn')]",
+                "//span[contains(text(), 'Download')]/..",
+                # PrimeFaces spezifisch
+                "//button[contains(@id, 'download')]",
+                "//a[contains(@id, 'download')]",
+            ]
 
-            for btn in download_buttons:
+            download_clicked = False
+            for selector in download_selectors:
                 try:
-                    if btn.is_displayed():
-                        self.driver.execute_script("arguments[0].click();", btn)
-                        logger.info("Download-Button geklickt")
-                        break
+                    buttons = self.driver.find_elements(By.XPATH, selector)
+                    for btn in buttons:
+                        if btn.is_displayed():
+                            self.driver.execute_script("arguments[0].click();", btn)
+                            logger.info(f"Download-Button geklickt: {selector}")
+                            download_clicked = True
+                            break
                 except Exception:
                     continue
+                if download_clicked:
+                    break
+
+            if not download_clicked:
+                logger.warning("Kein Download-Button gefunden - versuche Fallback")
+                # Fallback: Alle Buttons durchgehen
+                all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                for btn in all_buttons:
+                    try:
+                        btn_text = btn.text.lower()
+                        if "download" in btn_text or "herunterladen" in btn_text:
+                            self.driver.execute_script("arguments[0].click();", btn)
+                            logger.info(f"Fallback Download-Button geklickt: {btn.text}")
+                            download_clicked = True
+                            break
+                    except:
+                        continue
 
             # 4. Warten auf Download
+            logger.info("Warte auf Download...")
             for i in range(45):
                 time.sleep(1)
 
@@ -714,11 +790,17 @@ class GesellschafterlistenDownloader:
                         return new_name
                     return newest
 
+                # Progress-Log alle 10 Sekunden
+                if i > 0 and i % 10 == 0:
+                    logger.debug(f"Warte auf Download... {i}s")
+
             logger.warning("Download-Timeout für Gesellschafterliste")
             return None
 
         except Exception as e:
             logger.error(f"Fehler beim Herunterladen der Gesellschafterliste: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return None
 
     def _download_dk_documents(self, register_num: str) -> Optional[Path]:
@@ -998,63 +1080,133 @@ class GesellschafterlistenDownloader:
             return False
 
     def _expand_all_tree_nodes(self):
-        """Expandiert alle Knoten im PrimeFaces Tree und auf Dokumentenseiten."""
-        max_iterations = 10
+        """Expandiert alle Knoten im PrimeFaces Tree und auf Dokumentenseiten.
+
+        Die handelsregister.de Dokumentenseite hat folgende Struktur:
+        - "Dokumente zum Rechtsträger" (enthält Gesellschafterlisten!)
+        - "Dokumente zur Registernummer" (enthält meist Sammelmappe)
+
+        Beide müssen expandiert werden, besonders "Dokumente zum Rechtsträger".
+        """
+        max_iterations = 15
+
+        # Zuerst explizit auf "Dokumente zum Rechtsträger" klicken
+        # Das ist der wichtige Knoten für Gesellschafterlisten
+        rechtsträger_selectors = [
+            "//span[contains(text(), 'Dokumente zum Rechtsträger')]",
+            "//a[contains(text(), 'Dokumente zum Rechtsträger')]",
+            "//*[contains(text(), 'Rechtsträger')]",
+        ]
+
+        for selector in rechtsträger_selectors:
+            try:
+                elements = self.driver.find_elements(By.XPATH, selector)
+                for el in elements:
+                    if el.is_displayed():
+                        # Finde den klickbaren Toggler/Pfeil
+                        try:
+                            # Der Toggler ist oft ein Geschwister-Element oder im Parent
+                            parent = el.find_element(By.XPATH, "./..")
+                            toggler = parent.find_element(By.CSS_SELECTOR,
+                                ".ui-tree-toggler, [class*='toggler'], [class*='expand'], span[class*='icon']")
+                            self.driver.execute_script("arguments[0].click();", toggler)
+                            logger.info("Klick auf Toggler neben 'Dokumente zum Rechtsträger'")
+                        except:
+                            # Direkter Klick auf das Element
+                            self.driver.execute_script("arguments[0].click();", el)
+                            logger.info("Direkter Klick auf 'Dokumente zum Rechtsträger'")
+                        time.sleep(random.uniform(1, 2))
+                        break
+            except Exception as e:
+                logger.debug(f"Rechtsträger-Expansion fehlgeschlagen: {e}")
 
         for iteration in range(max_iterations):
             expanded_something = False
 
-            # Methode 1: PrimeFaces Tree Toggler
+            # Methode 1: PrimeFaces Tree Toggler (alle expandieren)
             togglers = self.driver.find_elements(
                 By.CSS_SELECTOR,
-                ".ui-tree-toggler, .ui-treetable-toggler"
+                ".ui-tree-toggler, .ui-treetable-toggler, [class*='tree-toggler']"
             )
 
             for toggler in togglers:
                 try:
+                    # Prüfen ob der Knoten collapsed ist
                     parent_node = toggler.find_element(By.XPATH, "./ancestor::li[1]")
                     classes = parent_node.get_attribute("class") or ""
-                    if "collapsed" in classes.lower() or "ui-treenode-collapsed" in classes:
+                    aria_expanded = parent_node.get_attribute("aria-expanded")
+
+                    is_collapsed = (
+                        "collapsed" in classes.lower() or
+                        "ui-treenode-collapsed" in classes or
+                        aria_expanded == "false"
+                    )
+
+                    if is_collapsed:
                         self.driver.execute_script("arguments[0].click();", toggler)
                         expanded_something = True
-                        time.sleep(0.5)
+                        logger.debug(f"Tree-Knoten expandiert (Iteration {iteration})")
+                        time.sleep(random.uniform(0.5, 1))
                 except Exception:
                     continue
 
-            # Methode 2: Klickbare Kategorien auf Dokumentenseite
-            # (z.B. "Dokumente zum Rechtsträger", "Dokumente zur Registernummer")
-            category_selectors = [
-                "//span[contains(text(), 'Dokumente zum')]",
-                "//span[contains(text(), 'Dokumente zur')]",
-                "//a[contains(text(), 'Dokumente')]",
-                "//*[contains(@class, 'ui-panel-title')]",
-                "//*[contains(@class, 'toggleable')]",
+            # Methode 2: Spezifische Dokumenten-Kategorien expandieren
+            doc_category_texts = [
+                "Dokumente zum Rechtsträger",
+                "Dokumente zur Registernummer",
+                "Liste der Gesellschafter",
+                "Gesellschafterliste",
             ]
 
-            for selector in category_selectors:
+            for text in doc_category_texts:
                 try:
-                    categories = self.driver.find_elements(By.XPATH, selector)
-                    for cat in categories:
-                        if cat.is_displayed():
-                            # Prüfen ob es einen Pfeil/Toggler neben dem Text gibt
-                            try:
-                                parent = cat.find_element(By.XPATH, "./..")
-                                # Klick auf den Parent (könnte ein Panel-Header sein)
-                                self.driver.execute_script("arguments[0].click();", parent)
+                    xpath = f"//*[contains(text(), '{text}')]"
+                    elements = self.driver.find_elements(By.XPATH, xpath)
+
+                    for el in elements:
+                        if not el.is_displayed():
+                            continue
+
+                        # Finde den zugehörigen Toggler
+                        try:
+                            # Versuche im selben Container nach Toggler zu suchen
+                            container = el.find_element(By.XPATH, "./ancestor::*[contains(@class, 'node') or contains(@class, 'item')][1]")
+                            toggler = container.find_element(By.CSS_SELECTOR,
+                                "[class*='toggler'], [class*='expand'], [class*='icon-plus'], span[class*='icon']")
+                            if toggler.is_displayed():
+                                self.driver.execute_script("arguments[0].click();", toggler)
                                 expanded_something = True
                                 time.sleep(0.5)
-                            except:
-                                self.driver.execute_script("arguments[0].click();", cat)
-                                expanded_something = True
-                                time.sleep(0.5)
+                        except:
+                            pass
                 except Exception:
                     continue
 
-            # Methode 3: Alle Elemente mit "plus" oder "expand" Icons
+            # Methode 3: Alle noch collapsed Knoten finden
+            collapsed_nodes = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "[aria-expanded='false'], .collapsed, .ui-treenode-collapsed"
+            )
+
+            for node in collapsed_nodes:
+                try:
+                    # Toggler im Knoten finden
+                    toggler = node.find_element(By.CSS_SELECTOR,
+                        ".ui-tree-toggler, [class*='toggler'], span:first-child")
+                    if toggler.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", toggler)
+                        expanded_something = True
+                        time.sleep(0.3)
+                except Exception:
+                    continue
+
+            # Methode 4: Icons die auf collapsed hindeuten
             expand_icons = self.driver.find_elements(
                 By.CSS_SELECTOR,
-                "[class*='expand'], [class*='plus'], [class*='collapsed'] > span"
+                "[class*='plus'], [class*='right'], [class*='collapsed'] span, "
+                ".ui-icon-triangle-1-e, .ui-icon-plusthick"
             )
+
             for icon in expand_icons:
                 try:
                     if icon.is_displayed():
@@ -1065,9 +1217,10 @@ class GesellschafterlistenDownloader:
                     continue
 
             if not expanded_something:
+                logger.debug(f"Keine weiteren Knoten zum Expandieren (Iteration {iteration})")
                 break
 
-            time.sleep(0.5)
+            time.sleep(random.uniform(0.3, 0.7))
 
         logger.debug(f"Tree-Expansion nach {iteration + 1} Iterationen abgeschlossen")
 
