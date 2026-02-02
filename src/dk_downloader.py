@@ -648,7 +648,8 @@ class GesellschafterlistenDownloader:
             gl_found = False
             gl_element = None
 
-            # Schritt 2a: Erst den Parent-Knoten "Liste der Gesellschafter" expandieren
+            # Schritt 2a: Den "Liste der Gesellschafter" Knoten finden und EXPANDIEREN (nicht auswählen!)
+            gl_node_expanded = False
             for pattern in gl_parent_patterns:
                 try:
                     parent_elements = self.driver.find_elements(
@@ -662,27 +663,61 @@ class GesellschafterlistenDownloader:
                         parent_text = parent_el.text.strip()
 
                         # Prüfen ob es der Haupt-Knoten ist (ohne Datum)
-                        # Der Haupt-Knoten heißt nur "List of shareholders"
+                        # Der Haupt-Knoten heißt nur "List of shareholders" / "Liste der Gesellschafter"
                         # Die Einträge haben "– entry in the register folder on DD/MM/YYYY"
-                        if "entry" not in parent_text.lower() and "eintrag" not in parent_text.lower():
+                        has_date = any(x in parent_text.lower() for x in ["entry", "eintrag", "vom ", "/20", "/19"])
+
+                        if not has_date:
                             logger.info(f"GL-Hauptknoten gefunden: '{parent_text}'")
 
-                            # Toggler für diesen Knoten finden und expandieren
+                            # WICHTIG: Diesen Knoten EXPANDIEREN, nicht auswählen!
+                            # Wir müssen auf den Toggler (Pfeil) klicken, nicht auf den Text
+                            expanded = False
+
+                            # Methode 1: Toggler im gleichen Container
                             try:
-                                # Im Parent-Container nach Toggler suchen
                                 container = parent_el.find_element(By.XPATH, "./..")
                                 toggler = container.find_element(By.CSS_SELECTOR,
-                                    ".ui-tree-toggler, [class*='toggler'], [class*='expand'], span[class*='icon']")
+                                    ".ui-tree-toggler, [class*='toggler'], span[class*='icon']")
                                 if toggler.is_displayed():
                                     self.driver.execute_script("arguments[0].click();", toggler)
-                                    logger.info("GL-Knoten expandiert")
-                                    time.sleep(random.uniform(1, 2))
+                                    expanded = True
+                                    logger.info("GL-Knoten via Toggler expandiert")
                             except:
-                                # Direkter Klick auf das Element (könnte auch expandieren)
-                                self.driver.execute_script("arguments[0].click();", parent_el)
-                                time.sleep(random.uniform(1, 2))
+                                pass
 
+                            # Methode 2: Suche nach Toggler vor dem Text-Element
+                            if not expanded:
+                                try:
+                                    # Oft ist der Toggler ein vorhergehendes Geschwister-Element
+                                    toggler = parent_el.find_element(By.XPATH,
+                                        "./preceding-sibling::*[contains(@class, 'toggler') or contains(@class, 'icon')]")
+                                    if toggler.is_displayed():
+                                        self.driver.execute_script("arguments[0].click();", toggler)
+                                        expanded = True
+                                        logger.info("GL-Knoten via vorhergehendes Element expandiert")
+                                except:
+                                    pass
+
+                            # Methode 3: Doppelklick auf das Element (expandiert oft Tree-Nodes)
+                            if not expanded:
+                                try:
+                                    from selenium.webdriver.common.action_chains import ActionChains
+                                    actions = ActionChains(self.driver)
+                                    actions.double_click(parent_el).perform()
+                                    expanded = True
+                                    logger.info("GL-Knoten via Doppelklick expandiert")
+                                except:
+                                    pass
+
+                            if expanded:
+                                gl_node_expanded = True
+                                time.sleep(random.uniform(2, 3))  # Länger warten nach Expansion
                             break
+
+                    if gl_node_expanded:
+                        break
+
                 except Exception as e:
                     logger.debug(f"GL-Parent-Expansion fehlgeschlagen: {e}")
 
@@ -690,6 +725,10 @@ class GesellschafterlistenDownloader:
             time.sleep(random.uniform(0.5, 1))
 
             # Schritt 2b: Jetzt den ERSTEN (obersten = neuesten) Eintrag mit Datum auswählen
+            # Nach der Expansion sollten Einträge mit Datum sichtbar sein
+            self._save_debug_screenshot("after_gl_expand")
+
+            # Patterns für GL-Einträge MIT Datum
             gl_entry_patterns = [
                 # Englisch mit Datum
                 "List of shareholders – entry",
@@ -698,6 +737,10 @@ class GesellschafterlistenDownloader:
                 "Liste der Gesellschafter – Eintrag",
                 "Liste der Gesellschafter - Eintrag",
                 "Gesellschafterliste vom",
+                # Alternativen
+                "Liste der Gesellschafter vom",
+                "Gesellschafterliste –",
+                "Gesellschafterliste -",
             ]
 
             for pattern in gl_entry_patterns:
@@ -707,14 +750,23 @@ class GesellschafterlistenDownloader:
                         By.XPATH, f"//*[contains(text(), '{pattern}')]"
                     )
 
-                    # Nur sichtbare Elemente
-                    visible_entries = [el for el in entry_elements if el.is_displayed()]
+                    # Nur sichtbare Elemente, die auch ein Datum enthalten
+                    visible_entries = []
+                    for el in entry_elements:
+                        if not el.is_displayed():
+                            continue
+                        el_text = el.text.strip()
+                        # Prüfe ob ein Datum im Text ist (Format: DD.MM.YYYY oder DD/MM/YYYY)
+                        import re
+                        if re.search(r'\d{2}[./]\d{2}[./]\d{4}', el_text):
+                            visible_entries.append(el)
+                            logger.debug(f"GL-Eintrag mit Datum: '{el_text[:50]}'")
 
                     if visible_entries:
                         # Der ERSTE (oberste) Eintrag ist der neueste
                         newest_entry = visible_entries[0]
                         entry_text = newest_entry.text.strip()
-                        logger.info(f"Neueste Gesellschafterliste gefunden: '{entry_text[:60]}'")
+                        logger.info(f"Neueste Gesellschafterliste: '{entry_text[:60]}'")
 
                         # Element auswählen (anklicken)
                         try:
@@ -736,6 +788,29 @@ class GesellschafterlistenDownloader:
                 except Exception as e:
                     logger.debug(f"GL-Eintrag-Suche fehlgeschlagen für '{pattern}': {e}")
                     continue
+
+            # Zusätzliche Suche: Alle Elemente mit "Gesellschafter" UND Datum
+            if not gl_found:
+                logger.info("Suche nach Elementen mit 'Gesellschafter' und Datum...")
+                try:
+                    all_elements = self.driver.find_elements(By.XPATH,
+                        "//*[contains(text(), 'Gesellschafter') or contains(text(), 'shareholders')]")
+
+                    import re
+                    for el in all_elements:
+                        if not el.is_displayed():
+                            continue
+                        el_text = el.text.strip()
+                        # Hat das Element ein Datum?
+                        if re.search(r'\d{2}[./]\d{2}[./]\d{4}', el_text):
+                            logger.info(f"GL mit Datum gefunden: '{el_text[:60]}'")
+                            self.driver.execute_script("arguments[0].click();", el)
+                            gl_found = True
+                            gl_element = el
+                            time.sleep(random.uniform(1, 2))
+                            break
+                except Exception as e:
+                    logger.debug(f"Alternative GL-Suche fehlgeschlagen: {e}")
 
             # Fallback: Falls keine Einträge mit Datum gefunden, nimm den ersten GL-Treffer
             if not gl_found:
@@ -780,52 +855,126 @@ class GesellschafterlistenDownloader:
 
                 return None
 
-            # 3. Download-Button klicken
+            # 3. Format auswählen (PDF bevorzugen, falls verfügbar)
             time.sleep(random.uniform(1, 2))
             self._save_debug_screenshot("gl_selected")
 
-            # Verschiedene Download-Button-Selektoren
+            # Versuche PDF-Format auszuwählen (statt ZIP)
+            try:
+                # Radio-Button für PDF finden
+                pdf_radio_selectors = [
+                    "//input[@type='radio' and @value='pdf']",
+                    "//input[@type='radio'][following-sibling::*[contains(text(), 'pdf')]]",
+                    "//label[contains(text(), 'pdf')]//input",
+                    "//label[contains(text(), 'pdf')]/preceding-sibling::input",
+                ]
+                for selector in pdf_radio_selectors:
+                    try:
+                        pdf_radios = self.driver.find_elements(By.XPATH, selector)
+                        for radio in pdf_radios:
+                            if radio.is_displayed() and not radio.is_selected():
+                                self.driver.execute_script("arguments[0].click();", radio)
+                                logger.info("PDF-Format ausgewählt")
+                                time.sleep(0.5)
+                                break
+                    except:
+                        continue
+            except Exception as e:
+                logger.debug(f"PDF-Format-Auswahl nicht möglich: {e}")
+
+            # 4. Download-Button klicken
+
+            # Der Download-Button ist im rechten Panel unter "Download"
+            # Er ist meist ein PrimeFaces CommandButton mit spezifischer ID
             download_selectors = [
+                # Spezifische IDs für handelsregister.de
+                "//button[@id='form:j_id_2h']",  # Häufige ID
+                "//button[contains(@id, 'btnDownload')]",
+                "//button[contains(@id, 'Download')]",
+                "//input[contains(@id, 'btnDownload')]",
+                # Text-basiert
+                "//button[normalize-space(text())='Download']",
                 "//button[contains(text(), 'Download')]",
-                "//a[contains(text(), 'Download')]",
                 "//input[@value='Download']",
-                "//*[contains(@class, 'download')]",
-                "//button[contains(@class, 'btn')]",
-                "//span[contains(text(), 'Download')]/..",
-                # PrimeFaces spezifisch
-                "//button[contains(@id, 'download')]",
-                "//a[contains(@id, 'download')]",
+                # PrimeFaces CommandButton mit span
+                "//button[span[contains(text(), 'Download')]]",
+                "//button[.//span[normalize-space()='Download']]",
+                # Class-basiert
+                "//button[contains(@class, 'ui-button')]//span[text()='Download']/..",
             ]
 
             download_clicked = False
+            download_btn = None
+
             for selector in download_selectors:
                 try:
                     buttons = self.driver.find_elements(By.XPATH, selector)
                     for btn in buttons:
                         if btn.is_displayed():
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            logger.info(f"Download-Button geklickt: {selector}")
-                            download_clicked = True
+                            download_btn = btn
+                            logger.info(f"Download-Button gefunden: {selector}")
                             break
                 except Exception:
                     continue
-                if download_clicked:
+                if download_btn:
                     break
 
-            if not download_clicked:
-                logger.warning("Kein Download-Button gefunden - versuche Fallback")
-                # Fallback: Alle Buttons durchgehen
+            # Fallback: Alle Buttons durchgehen
+            if not download_btn:
+                logger.info("Suche Download-Button über Text...")
                 all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
                 for btn in all_buttons:
                     try:
-                        btn_text = btn.text.lower()
-                        if "download" in btn_text or "herunterladen" in btn_text:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            logger.info(f"Fallback Download-Button geklickt: {btn.text}")
-                            download_clicked = True
+                        if not btn.is_displayed():
+                            continue
+                        btn_text = (btn.text or "").lower()
+                        btn_id = (btn.get_attribute("id") or "").lower()
+                        if "download" in btn_text or "download" in btn_id:
+                            download_btn = btn
+                            logger.info(f"Download-Button via Text gefunden: '{btn.text}'")
                             break
                     except:
                         continue
+
+            if download_btn:
+                # Button gefunden - verschiedene Klick-Methoden probieren
+                try:
+                    # Methode 1: Scroll ins Sichtfeld und ActionChains
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        download_btn
+                    )
+                    time.sleep(0.5)
+
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    actions = ActionChains(self.driver)
+                    actions.move_to_element(download_btn).pause(0.3).click().perform()
+                    download_clicked = True
+                    logger.info("Download via ActionChains geklickt")
+                except Exception as e:
+                    logger.debug(f"ActionChains fehlgeschlagen: {e}")
+
+                if not download_clicked:
+                    try:
+                        # Methode 2: JavaScript-Klick
+                        self.driver.execute_script("arguments[0].click();", download_btn)
+                        download_clicked = True
+                        logger.info("Download via JS geklickt")
+                    except Exception as e:
+                        logger.debug(f"JS-Klick fehlgeschlagen: {e}")
+
+                if not download_clicked:
+                    try:
+                        # Methode 3: Direkter Selenium-Klick
+                        download_btn.click()
+                        download_clicked = True
+                        logger.info("Download via direktem Klick")
+                    except Exception as e:
+                        logger.debug(f"Direkter Klick fehlgeschlagen: {e}")
+            else:
+                logger.warning("Kein Download-Button gefunden!")
+
+            self._save_debug_screenshot("after_download_click")
 
             # 4. Warten auf Download
             logger.info("Warte auf Download...")
@@ -1388,37 +1537,65 @@ class GesellschafterlistenDownloader:
             return None
 
     def _extract_pdf_from_zip(self, zip_path: Path, base_name: str) -> Optional[Path]:
-        """Extrahiert PDF aus ZIP-Datei."""
+        """Extrahiert PDF oder TIF aus ZIP-Datei.
+
+        Handelsregister.de liefert ältere Dokumente oft als TIF-Scans statt PDF.
+        """
         import zipfile
 
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                # PDF in ZIP finden
-                pdf_files = [f for f in zf.namelist() if f.lower().endswith('.pdf')]
+        extracted_path = None
 
-                if not pdf_files:
-                    logger.warning(f"Keine PDF in ZIP gefunden: {zip_path}")
+        try:
+            # ZIP öffnen und Inhalt analysieren
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                # PDF oder TIF in ZIP finden (PDF bevorzugt)
+                all_files = zf.namelist()
+                pdf_files = [f for f in all_files if f.lower().endswith('.pdf')]
+                tif_files = [f for f in all_files if f.lower().endswith(('.tif', '.tiff'))]
+
+                target_file = None
+                target_ext = None
+
+                if pdf_files:
+                    target_file = pdf_files[0]
+                    target_ext = '.pdf'
+                elif tif_files:
+                    target_file = tif_files[0]
+                    target_ext = '.tif'
+                    logger.info(f"Kein PDF in ZIP, aber TIF-Scan gefunden: {target_file}")
+
+                if not target_file:
+                    logger.warning(f"Keine PDF/TIF in ZIP gefunden: {zip_path}")
+                    logger.debug(f"ZIP-Inhalt: {all_files}")
                     return None
 
-                # Erste/einzige PDF extrahieren
-                pdf_name = pdf_files[0]
-                extracted = zf.extract(pdf_name, self.download_dir)
+                # Datei extrahieren
+                extracted = zf.extract(target_file, self.download_dir)
 
                 # Umbenennen
-                new_name = self.download_dir / f"{base_name}_gesellschafterliste.pdf"
+                new_name = self.download_dir / f"{base_name}_gesellschafterliste{target_ext}"
                 if new_name.exists():
                     new_name.unlink()
 
                 Path(extracted).rename(new_name)
+                extracted_path = new_name
 
-                # ZIP löschen
+            # ZIP löschen (außerhalb des with-Blocks, damit ZIP geschlossen ist)
+            try:
+                time.sleep(0.5)  # Kurz warten bis Windows die Datei freigibt
                 zip_path.unlink()
+                logger.debug(f"ZIP gelöscht: {zip_path}")
+            except Exception as e:
+                logger.debug(f"ZIP konnte nicht gelöscht werden (wird später aufgeräumt): {e}")
 
-                logger.info(f"PDF aus ZIP extrahiert: {new_name}")
-                return new_name
+            logger.info(f"Dokument aus ZIP extrahiert: {extracted_path}")
+            return extracted_path
 
         except Exception as e:
             logger.error(f"ZIP-Extraktion fehlgeschlagen: {e}")
+            # Falls wir bereits extrahiert haben, gib den Pfad zurück
+            if extracted_path and extracted_path.exists():
+                return extracted_path
             return None
 
     def __enter__(self):
