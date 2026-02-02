@@ -28,3 +28,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Debug screenshots (may contain sensitive company data)
+debug*.png
+debug_screenshot.png
