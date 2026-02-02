@@ -637,67 +637,127 @@ class GesellschafterlistenDownloader:
             time.sleep(random.uniform(2, 3))
             self._save_debug_screenshot("tree_expanded")
 
-            # 2. Nach "Gesellschafterliste" oder "Liste der Gesellschafter" suchen
-            gl_patterns = [
-                "Liste der Gesellschafter",
+            # 2. "Liste der Gesellschafter" Knoten finden und expandieren
+            # Dann den ERSTEN (neuesten) Eintrag darunter auswählen
+            gl_parent_patterns = [
+                "List of shareholders",  # Englisch
+                "Liste der Gesellschafter",  # Deutsch
                 "Gesellschafterliste",
-                "Gesellschafter-Liste",
-                "GL ",  # Abkürzung
             ]
 
             gl_found = False
             gl_element = None
 
-            # Zuerst alle sichtbaren Elemente mit dem Suchtext sammeln
-            for pattern in gl_patterns:
+            # Schritt 2a: Erst den Parent-Knoten "Liste der Gesellschafter" expandieren
+            for pattern in gl_parent_patterns:
                 try:
-                    # Verschiedene XPath-Varianten probieren
-                    xpaths = [
-                        f"//*[contains(text(), '{pattern}')]",
-                        f"//span[contains(text(), '{pattern}')]",
-                        f"//a[contains(text(), '{pattern}')]",
-                        f"//td[contains(text(), '{pattern}')]",
-                        f"//div[contains(text(), '{pattern}')]",
-                    ]
+                    parent_elements = self.driver.find_elements(
+                        By.XPATH, f"//*[contains(text(), '{pattern}')]"
+                    )
 
-                    for xpath in xpaths:
-                        gl_elements = self.driver.find_elements(By.XPATH, xpath)
+                    for parent_el in parent_elements:
+                        if not parent_el.is_displayed():
+                            continue
 
-                        for el in gl_elements:
+                        parent_text = parent_el.text.strip()
+
+                        # Prüfen ob es der Haupt-Knoten ist (ohne Datum)
+                        # Der Haupt-Knoten heißt nur "List of shareholders"
+                        # Die Einträge haben "– entry in the register folder on DD/MM/YYYY"
+                        if "entry" not in parent_text.lower() and "eintrag" not in parent_text.lower():
+                            logger.info(f"GL-Hauptknoten gefunden: '{parent_text}'")
+
+                            # Toggler für diesen Knoten finden und expandieren
                             try:
-                                if not el.is_displayed():
-                                    continue
-
-                                # Element gefunden - jetzt richtig auswählen
-                                logger.info(f"Gesellschafterliste gefunden: '{el.text[:50]}'")
-
-                                # In der Baum-Struktur muss man oft den Parent-Knoten klicken
-                                # um das Dokument auszuwählen
-                                try:
-                                    # Versuche den Tree-Node-Content zu finden
-                                    treenode = el.find_element(By.XPATH,
-                                        "./ancestor::*[contains(@class, 'treenode') or contains(@class, 'tree-node')][1]")
-                                    content = treenode.find_element(By.CSS_SELECTOR,
-                                        ".ui-treenode-content, .tree-content, *")
-                                    self.driver.execute_script("arguments[0].click();", content)
-                                except:
-                                    # Direkter Klick auf das Element
-                                    self.driver.execute_script("arguments[0].click();", el)
-
-                                gl_found = True
-                                gl_element = el
+                                # Im Parent-Container nach Toggler suchen
+                                container = parent_el.find_element(By.XPATH, "./..")
+                                toggler = container.find_element(By.CSS_SELECTOR,
+                                    ".ui-tree-toggler, [class*='toggler'], [class*='expand'], span[class*='icon']")
+                                if toggler.is_displayed():
+                                    self.driver.execute_script("arguments[0].click();", toggler)
+                                    logger.info("GL-Knoten expandiert")
+                                    time.sleep(random.uniform(1, 2))
+                            except:
+                                # Direkter Klick auf das Element (könnte auch expandieren)
+                                self.driver.execute_script("arguments[0].click();", parent_el)
                                 time.sleep(random.uniform(1, 2))
-                                break
-                            except Exception as e:
-                                logger.debug(f"Klick auf GL-Element fehlgeschlagen: {e}")
-                                continue
 
-                        if gl_found:
                             break
-                    if gl_found:
+                except Exception as e:
+                    logger.debug(f"GL-Parent-Expansion fehlgeschlagen: {e}")
+
+            self._save_debug_screenshot("gl_parent_expanded")
+            time.sleep(random.uniform(0.5, 1))
+
+            # Schritt 2b: Jetzt den ERSTEN (obersten = neuesten) Eintrag mit Datum auswählen
+            gl_entry_patterns = [
+                # Englisch mit Datum
+                "List of shareholders – entry",
+                "List of shareholders - entry",
+                # Deutsch mit Datum
+                "Liste der Gesellschafter – Eintrag",
+                "Liste der Gesellschafter - Eintrag",
+                "Gesellschafterliste vom",
+            ]
+
+            for pattern in gl_entry_patterns:
+                try:
+                    # XPath für Einträge mit Datum
+                    entry_elements = self.driver.find_elements(
+                        By.XPATH, f"//*[contains(text(), '{pattern}')]"
+                    )
+
+                    # Nur sichtbare Elemente
+                    visible_entries = [el for el in entry_elements if el.is_displayed()]
+
+                    if visible_entries:
+                        # Der ERSTE (oberste) Eintrag ist der neueste
+                        newest_entry = visible_entries[0]
+                        entry_text = newest_entry.text.strip()
+                        logger.info(f"Neueste Gesellschafterliste gefunden: '{entry_text[:60]}'")
+
+                        # Element auswählen (anklicken)
+                        try:
+                            # Versuche den Tree-Node-Content zu finden
+                            treenode = newest_entry.find_element(By.XPATH,
+                                "./ancestor::*[contains(@class, 'treenode') or contains(@class, 'tree-node')][1]")
+                            content = treenode.find_element(By.CSS_SELECTOR,
+                                ".ui-treenode-content, .tree-content, *")
+                            self.driver.execute_script("arguments[0].click();", content)
+                        except:
+                            # Direkter Klick auf das Element
+                            self.driver.execute_script("arguments[0].click();", newest_entry)
+
+                        gl_found = True
+                        gl_element = newest_entry
+                        time.sleep(random.uniform(1, 2))
                         break
-                except Exception:
+
+                except Exception as e:
+                    logger.debug(f"GL-Eintrag-Suche fehlgeschlagen für '{pattern}': {e}")
                     continue
+
+            # Fallback: Falls keine Einträge mit Datum gefunden, nimm den ersten GL-Treffer
+            if not gl_found:
+                logger.info("Keine GL-Einträge mit Datum gefunden, versuche Fallback...")
+                for pattern in gl_parent_patterns:
+                    try:
+                        all_gl = self.driver.find_elements(
+                            By.XPATH, f"//*[contains(text(), '{pattern}')]"
+                        )
+                        visible_gl = [el for el in all_gl if el.is_displayed()]
+
+                        if visible_gl:
+                            # Nimm den ersten sichtbaren
+                            first_gl = visible_gl[0]
+                            logger.info(f"Fallback GL gefunden: '{first_gl.text[:50]}'")
+                            self.driver.execute_script("arguments[0].click();", first_gl)
+                            gl_found = True
+                            gl_element = first_gl
+                            time.sleep(random.uniform(1, 2))
+                            break
+                    except:
+                        continue
 
             if not gl_found:
                 logger.warning("Keine Gesellschafterliste im Dokumentenbaum gefunden")
