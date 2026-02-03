@@ -133,6 +133,19 @@ class Database:
 
         return cursor.lastrowid
 
+    def _execute_with_limit(self, base_query: str, limit: int = None) -> list:
+        """Executes query with optional LIMIT clause using parameterized query."""
+        params = []
+        query = base_query
+
+        if limit is not None:
+            if not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"Invalid limit: {limit}")
+            query += " LIMIT ?"
+            params.append(limit)
+
+        return self.conn.execute(query, params).fetchall()
+
     def get_pending_downloads(self, limit: int = None) -> List[Company]:
         """Holt Firmen die noch heruntergeladen werden müssen."""
         query = """
@@ -140,10 +153,7 @@ class Database:
             WHERE dk_downloaded = FALSE AND register_num IS NOT NULL AND register_num != ''
             ORDER BY id
         """
-        if limit:
-            query += f" LIMIT {limit}"
-
-        rows = self.conn.execute(query).fetchall()
+        rows = self._execute_with_limit(query, limit)
         return [self._row_to_company(row) for row in rows]
 
     def get_pending_parsing(self, limit: int = None) -> List[Company]:
@@ -153,10 +163,7 @@ class Database:
             WHERE dk_downloaded = TRUE AND pdf_parsed = FALSE AND pdf_path IS NOT NULL
             ORDER BY id
         """
-        if limit:
-            query += f" LIMIT {limit}"
-
-        rows = self.conn.execute(query).fetchall()
+        rows = self._execute_with_limit(query, limit)
         return [self._row_to_company(row) for row in rows]
 
     def update_download_status(self, company_id: int, pdf_path: Optional[str], success: bool):

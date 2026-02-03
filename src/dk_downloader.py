@@ -120,6 +120,47 @@ class GesellschafterlistenDownloader:
         "leipzig": "Leipzig",
     }
 
+    # Windows reserved device names that cannot be used as filenames
+    WINDOWS_RESERVED_NAMES = frozenset([
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    ])
+
+    def _sanitize_filename(self, name: str) -> str:
+        """
+        Sanitizes a string for safe use as filename.
+        Prevents path traversal attacks (CWE-22).
+
+        Returns:
+            Safe filename string, never empty.
+
+        Raises:
+            ValueError: If input is empty or None.
+        """
+        import re
+
+        if not name or not name.strip():
+            raise ValueError("Filename cannot be empty")
+
+        # First: Remove ALL non-allowed characters (prevents path traversal)
+        safe = re.sub(r'[^\w\s\-]', '', name)
+        # Collapse multiple spaces/hyphens/underscores
+        safe = re.sub(r'[-\s_]+', '_', safe)
+        # Limit length (Windows max: 255, we use 200 for safety margin)
+        safe = safe[:200]
+        # Strip leading/trailing separators
+        safe = safe.strip('_-')
+
+        # Handle edge case: all characters were removed
+        if not safe:
+            raise ValueError(f"Filename '{name}' contains no valid characters")
+
+        # Block Windows reserved device names
+        if safe.upper() in self.WINDOWS_RESERVED_NAMES:
+            safe = f"file_{safe}"
+
+        return safe
 
     def _setup_driver(self) -> webdriver.Chrome:
         """Konfiguriert Chrome WebDriver."""
@@ -146,7 +187,7 @@ class GesellschafterlistenDownloader:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
         if USE_WEBDRIVER_MANAGER:
             service = Service(ChromeDriverManager().install())
@@ -629,7 +670,7 @@ class GesellschafterlistenDownloader:
         try:
             # Aktuelle Dateien merken
             existing_files = set(self.download_dir.glob("*.*"))
-            safe_name = register_num.replace(" ", "_").replace("/", "-")
+            safe_name = self._sanitize_filename(register_num)
 
             # 1. Dokumentenbaum expandieren - WICHTIG: "Dokumente zum Rechtsträger"!
             logger.info("Expandiere Dokumentenbaum...")
@@ -1105,7 +1146,7 @@ class GesellschafterlistenDownloader:
 
                         if new_files:
                             newest = max(new_files, key=lambda p: p.stat().st_mtime)
-                            safe_name = register_num.replace(" ", "_").replace("/", "-")
+                            safe_name = self._sanitize_filename(register_num)
                             if newest.suffix.lower() == '.zip':
                                 return self._extract_pdf_from_zip(newest, safe_name)
                             elif newest.suffix.lower() == '.pdf':
@@ -1505,7 +1546,7 @@ class GesellschafterlistenDownloader:
                     logger.info(f"Download abgeschlossen: {newest.name}")
 
                     # Safe filename erstellen
-                    safe_name = register_num.replace(" ", "_").replace("/", "-")
+                    safe_name = self._sanitize_filename(register_num)
 
                     # ZIP entpacken falls nötig
                     if newest.suffix.lower() == '.zip':
