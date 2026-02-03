@@ -120,21 +120,47 @@ class GesellschafterlistenDownloader:
         "leipzig": "Leipzig",
     }
 
+    # Windows reserved device names that cannot be used as filenames
+    WINDOWS_RESERVED_NAMES = frozenset([
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    ])
+
     def _sanitize_filename(self, name: str) -> str:
         """
         Sanitizes a string for safe use as filename.
         Prevents path traversal attacks (CWE-22).
+
+        Returns:
+            Safe filename string, never empty.
+
+        Raises:
+            ValueError: If input is empty or None.
         """
         import re
-        # Remove path traversal sequences
-        safe = name.replace("..", "").replace("/", "-").replace("\\", "-")
-        # Keep only alphanumeric, spaces, hyphens, underscores
-        safe = re.sub(r'[^\w\s\-]', '', safe)
-        # Collapse multiple spaces/hyphens
-        safe = re.sub(r'[-\s]+', '_', safe)
-        # Limit length (Windows max: 255)
+
+        if not name or not name.strip():
+            raise ValueError("Filename cannot be empty")
+
+        # First: Remove ALL non-allowed characters (prevents path traversal)
+        safe = re.sub(r'[^\w\s\-]', '', name)
+        # Collapse multiple spaces/hyphens/underscores
+        safe = re.sub(r'[-\s_]+', '_', safe)
+        # Limit length (Windows max: 255, we use 200 for safety margin)
         safe = safe[:200]
-        return safe.strip('_-')
+        # Strip leading/trailing separators
+        safe = safe.strip('_-')
+
+        # Handle edge case: all characters were removed
+        if not safe:
+            raise ValueError(f"Filename '{name}' contains no valid characters")
+
+        # Block Windows reserved device names
+        if safe.upper() in self.WINDOWS_RESERVED_NAMES:
+            safe = f"file_{safe}"
+
+        return safe
 
     def _setup_driver(self) -> webdriver.Chrome:
         """Konfiguriert Chrome WebDriver."""
