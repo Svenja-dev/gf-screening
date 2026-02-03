@@ -120,6 +120,21 @@ class GesellschafterlistenDownloader:
         "leipzig": "Leipzig",
     }
 
+    def _sanitize_filename(self, name: str) -> str:
+        """
+        Sanitizes a string for safe use as filename.
+        Prevents path traversal attacks (CWE-22).
+        """
+        import re
+        # Remove path traversal sequences
+        safe = name.replace("..", "").replace("/", "-").replace("\\", "-")
+        # Keep only alphanumeric, spaces, hyphens, underscores
+        safe = re.sub(r'[^\w\s\-]', '', safe)
+        # Collapse multiple spaces/hyphens
+        safe = re.sub(r'[-\s]+', '_', safe)
+        # Limit length (Windows max: 255)
+        safe = safe[:200]
+        return safe.strip('_-')
 
     def _setup_driver(self) -> webdriver.Chrome:
         """Konfiguriert Chrome WebDriver."""
@@ -146,7 +161,7 @@ class GesellschafterlistenDownloader:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
         if USE_WEBDRIVER_MANAGER:
             service = Service(ChromeDriverManager().install())
@@ -629,7 +644,7 @@ class GesellschafterlistenDownloader:
         try:
             # Aktuelle Dateien merken
             existing_files = set(self.download_dir.glob("*.*"))
-            safe_name = register_num.replace(" ", "_").replace("/", "-")
+            safe_name = self._sanitize_filename(register_num)
 
             # 1. Dokumentenbaum expandieren - WICHTIG: "Dokumente zum Rechtsträger"!
             logger.info("Expandiere Dokumentenbaum...")
@@ -1105,7 +1120,7 @@ class GesellschafterlistenDownloader:
 
                         if new_files:
                             newest = max(new_files, key=lambda p: p.stat().st_mtime)
-                            safe_name = register_num.replace(" ", "_").replace("/", "-")
+                            safe_name = self._sanitize_filename(register_num)
                             if newest.suffix.lower() == '.zip':
                                 return self._extract_pdf_from_zip(newest, safe_name)
                             elif newest.suffix.lower() == '.pdf':
@@ -1505,7 +1520,7 @@ class GesellschafterlistenDownloader:
                     logger.info(f"Download abgeschlossen: {newest.name}")
 
                     # Safe filename erstellen
-                    safe_name = register_num.replace(" ", "_").replace("/", "-")
+                    safe_name = self._sanitize_filename(register_num)
 
                     # ZIP entpacken falls nötig
                     if newest.suffix.lower() == '.zip':

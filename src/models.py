@@ -135,28 +135,40 @@ class Database:
 
     def get_pending_downloads(self, limit: int = None) -> List[Company]:
         """Holt Firmen die noch heruntergeladen werden müssen."""
-        query = """
-            SELECT * FROM companies
-            WHERE dk_downloaded = FALSE AND register_num IS NOT NULL AND register_num != ''
-            ORDER BY id
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-
-        rows = self.conn.execute(query).fetchall()
+        if limit is not None:
+            if not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"Invalid limit: {limit}")
+            rows = self.conn.execute("""
+                SELECT * FROM companies
+                WHERE dk_downloaded = FALSE AND register_num IS NOT NULL AND register_num != ''
+                ORDER BY id
+                LIMIT ?
+            """, (limit,)).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT * FROM companies
+                WHERE dk_downloaded = FALSE AND register_num IS NOT NULL AND register_num != ''
+                ORDER BY id
+            """).fetchall()
         return [self._row_to_company(row) for row in rows]
 
     def get_pending_parsing(self, limit: int = None) -> List[Company]:
         """Holt Firmen die noch geparst werden müssen."""
-        query = """
-            SELECT * FROM companies
-            WHERE dk_downloaded = TRUE AND pdf_parsed = FALSE AND pdf_path IS NOT NULL
-            ORDER BY id
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-
-        rows = self.conn.execute(query).fetchall()
+        if limit is not None:
+            if not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"Invalid limit: {limit}")
+            rows = self.conn.execute("""
+                SELECT * FROM companies
+                WHERE dk_downloaded = TRUE AND pdf_parsed = FALSE AND pdf_path IS NOT NULL
+                ORDER BY id
+                LIMIT ?
+            """, (limit,)).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT * FROM companies
+                WHERE dk_downloaded = TRUE AND pdf_parsed = FALSE AND pdf_path IS NOT NULL
+                ORDER BY id
+            """).fetchall()
         return [self._row_to_company(row) for row in rows]
 
     def update_download_status(self, company_id: int, pdf_path: Optional[str], success: bool):
