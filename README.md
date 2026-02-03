@@ -137,3 +137,12 @@ Bei Blockierung: 1h warten und mit `--resume` fortsetzen.
 - Gesellschafterlisten sind seit 01.08.2022 kostenlos auf handelsregister.de
 - Max. 60 Abrufe/Stunde laut Nutzungsordnung (Pipeline nutzt 55/h)
 - Nur für B2B-Vertriebszwecke verwenden
+
+## Lizenz
+
+MIT License - siehe [LICENSE](LICENSE)
+
+## Autoren
+
+- **Lara Knuth** - lara.knuth@gmail.com
+- **Claude** (Anthropic) - AI-Pair-Programming
