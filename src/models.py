@@ -2,11 +2,15 @@
 Datenmodelle und SQLite-Schema für GF-Screening Pipeline.
 """
 
+import csv
+import logging
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -99,14 +103,14 @@ class Database:
     CREATE INDEX IF NOT EXISTS idx_shareholders_company ON shareholders(company_id);
     """
 
-    def __init__(self, db_path: str = "data/gesellschafter.db"):
+    def __init__(self, db_path: str = "data/gesellschafter.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
-    def _init_schema(self):
+    def _init_schema(self) -> None:
         """Erstellt Tabellen falls nicht vorhanden."""
         self.conn.executescript(self.SCHEMA)
         self.conn.commit()
@@ -133,20 +137,33 @@ class Database:
 
         return cursor.lastrowid
 
-    def _execute_with_limit(self, base_query: str, limit: int = None) -> list:
-        """Executes query with optional LIMIT clause using parameterized query."""
-        params = []
-        query = base_query
+    def _execute_with_limit(self, base_query: str, limit: Optional[int] = None) -> list:
+        """Executes query with optional LIMIT clause using parameterized query.
+
+        Args:
+            base_query: SQL-Abfrage ohne LIMIT.
+            limit: Optionale maximale Anzahl Ergebnisse (1-10000).
+
+        Returns:
+            Liste der Ergebniszeilen.
+
+        Raises:
+            ValueError: Wenn limit kein positiver Integer oder > 10000.
+        """
+        params: list = []
+        query: str = base_query
 
         if limit is not None:
             if not isinstance(limit, int) or limit < 1:
-                raise ValueError(f"Invalid limit: {limit}")
+                raise ValueError(f"Invalid limit: {limit}. Must be positive integer.")
+            if limit > 10000:
+                raise ValueError(f"Limit {limit} exceeds maximum of 10000.")
             query += " LIMIT ?"
             params.append(limit)
 
         return self.conn.execute(query, params).fetchall()
 
-    def get_pending_downloads(self, limit: int = None) -> List[Company]:
+    def get_pending_downloads(self, limit: Optional[int] = None) -> List[Company]:
         """Holt Firmen die noch heruntergeladen werden müssen."""
         query = """
             SELECT * FROM companies
@@ -156,7 +173,7 @@ class Database:
         rows = self._execute_with_limit(query, limit)
         return [self._row_to_company(row) for row in rows]
 
-    def get_pending_parsing(self, limit: int = None) -> List[Company]:
+    def get_pending_parsing(self, limit: Optional[int] = None) -> List[Company]:
         """Holt Firmen die noch geparst werden müssen."""
         query = """
             SELECT * FROM companies
@@ -166,7 +183,8 @@ class Database:
         rows = self._execute_with_limit(query, limit)
         return [self._row_to_company(row) for row in rows]
 
-    def update_download_status(self, company_id: int, pdf_path: Optional[str], success: bool):
+    def update_download_status(self, company_id: int, pdf_path: Optional[str],
+                               success: bool) -> None:
         """Aktualisiert Download-Status."""
         self.conn.execute("""
             UPDATE companies SET
@@ -179,9 +197,9 @@ class Database:
 
     def update_parsing_result(self, company_id: int, natural_count: int,
                               legal_count: int, confidence: float,
-                              shareholders: List[Shareholder]):
+                              shareholders: List[Shareholder]) -> None:
         """Speichert Parsing-Ergebnis."""
-        is_qualified = natural_count <= 2 and legal_count == 0
+        is_qualified: bool = natural_count <= 2 and legal_count == 0
 
         self.conn.execute("""
             UPDATE companies SET
@@ -203,7 +221,8 @@ class Database:
 
         self.conn.commit()
 
-    def log_event(self, company_id: int, stage: str, status: str, message: str = ""):
+    def log_event(self, company_id: int, stage: str, status: str,
+                  message: str = "") -> None:
         """Loggt Pipeline-Event."""
         self.conn.execute("""
             INSERT INTO pipeline_log (company_id, stage, status, message)
@@ -213,7 +232,7 @@ class Database:
 
     def get_stats(self) -> dict:
         """Holt Pipeline-Statistiken."""
-        stats = {}
+        stats: dict = {}
 
         stats['total'] = self.conn.execute(
             "SELECT COUNT(*) FROM companies"
@@ -237,10 +256,20 @@ class Database:
 
         return stats
 
-    def export_qualified(self, output_path: str):
-        """Exportiert qualifizierte Leads als CSV."""
-        import csv
+    def export_qualified(self, output_path: str) -> int:
+        """Exportiert qualifizierte Leads als CSV.
 
+        Args:
+            output_path: Pfad zur Ausgabedatei.
+
+        Returns:
+            Anzahl exportierter Zeilen.
+
+        Raises:
+            FileNotFoundError: Wenn das Zielverzeichnis nicht existiert.
+            PermissionError: Wenn keine Schreibberechtigung besteht.
+            OSError: Bei sonstigen Dateisystemfehlern.
+        """
         rows = self.conn.execute("""
             SELECT
                 c.id, c.name, c.city, c.court, c.register_type, c.register_num,
@@ -253,17 +282,25 @@ class Database:
             ORDER BY c.name
         """).fetchall()
 
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f, delimiter=';')
-            writer.writerow([
-                'ID', 'Firma', 'Ort', 'Registergericht', 'Registerart',
-                'Registernummer', 'Anzahl Gesellschafter', 'Konfidenz', 'Gesellschafter'
-            ])
+        try:
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([
+                    'ID', 'Firma', 'Ort', 'Registergericht', 'Registerart',
+                    'Registernummer', 'Anzahl Gesellschafter', 'Konfidenz', 'Gesellschafter'
+                ])
 
-            for row in rows:
-                writer.writerow(list(row))
+                for row in rows:
+                    writer.writerow(list(row))
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            logger.error(f"Export fehlgeschlagen: {e}")
+            raise
 
         return len(rows)
+
+    def rollback(self) -> None:
+        """Rolls back uncommitted changes."""
+        self.conn.rollback()
 
     def _row_to_company(self, row: sqlite3.Row) -> Company:
         """Konvertiert DB-Row zu Company-Objekt."""
@@ -284,6 +321,6 @@ class Database:
             is_qualified=bool(row['is_qualified']) if row['is_qualified'] is not None else None
         )
 
-    def close(self):
+    def close(self) -> None:
         """Schließt Datenbankverbindung."""
         self.conn.close()

@@ -7,10 +7,13 @@ Unterstützt verschiedene Formate je nach Amtsgericht:
 - TIF/TIFF: OCR mit Tesseract (für ältere Scans)
 """
 
+import os
 import re
+import hashlib
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+
 from dataclasses import dataclass
 
 import pdfplumber
@@ -24,8 +27,10 @@ try:
     # Windows: Tesseract-Pfad konfigurieren
     import platform
     if platform.system() == 'Windows':
-        tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-        import os
+        tesseract_path = os.environ.get(
+            'TESSERACT_PATH',
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        )
         if os.path.exists(tesseract_path):
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
 except ImportError:
@@ -46,6 +51,12 @@ class ParsingResult:
     raw_text: str = ""
 
 
+# Reusable regex components
+_GERMAN_NAME = r"[A-ZÄÖÜ][a-zäöüß]+"
+_GERMAN_FULL_NAME = _GERMAN_NAME + r"(?:\s+" + _GERMAN_NAME + r")?"
+_DATE_FORMAT = r"\d{2}\.\d{2}\.\d{4}"
+
+
 class GesellschafterlisteParser:
     """Parser für deutsche Gesellschafterlisten-PDFs."""
 
@@ -53,37 +64,37 @@ class GesellschafterlisteParser:
     PATTERNS = {
         # Standard: "Mustermann, Max, Berlin, *01.01.1980"
         "standard_birth": re.compile(
-            r"([A-ZÄÖÜ][a-zäöüß]+),\s*([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?),\s*([^,*]+),\s*\*\s*(\d{2}\.\d{2}\.\d{4})",
+            rf"({_GERMAN_NAME}),\s*({_GERMAN_FULL_NAME}),\s*([^,*]+),\s*\*\s*({_DATE_FORMAT})",
             re.MULTILINE
         ),
 
         # "Max Mustermann, Berlin, *01.01.1980"
         "name_first": re.compile(
-            r"([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)+),\s*([^,*]+),\s*\*\s*(\d{2}\.\d{2}\.\d{4})",
+            rf"({_GERMAN_NAME}(?:\s+{_GERMAN_NAME})+),\s*([^,*]+),\s*\*\s*({_DATE_FORMAT})",
             re.MULTILINE
         ),
 
         # "1. Max Mustermann, geb. 01.01.1980"
         "numbered_geb": re.compile(
-            r"\d+\.\s*([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)+),?\s*geb\.\s*(\d{2}\.\d{2}\.\d{4})",
+            rf"\d+\.\s*({_GERMAN_NAME}(?:\s+{_GERMAN_NAME})+),?\s*geb\.\s*({_DATE_FORMAT})",
             re.MULTILINE
         ),
 
         # "Max Mustermann 50,00 %" oder "Max Mustermann 50.000,00 EUR"
         "name_share": re.compile(
-            r"([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)+)\s+(\d+(?:[.,]\d+)?)\s*(%|EUR|€)",
+            rf"({_GERMAN_NAME}(?:\s+{_GERMAN_NAME})+)\s+(\d+(?:[.,]\d+)?)\s*(%|EUR|€)",
             re.MULTILINE
         ),
 
         # Nur vollständige Namen in Zeilen
         "name_only": re.compile(
-            r"^([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+){1,3})$",
+            rf"^({_GERMAN_NAME}(?:\s+{_GERMAN_NAME}){{1,3}})$",
             re.MULTILINE
         ),
     }
 
     # Juristische Personen erkennen
-    LEGAL_ENTITY_MARKERS = [
+    LEGAL_ENTITY_MARKERS: List[str] = [
         "GmbH", "AG", "KG", "SE", "UG", "OHG", "e.V.", "e. V.",
         "Stiftung", "Ltd.", "B.V.", "S.A.", "S.L.", "Inc.", "Corp.",
         "Holding", "Beteiligungs", "Verwaltungs", "& Co.", "mbH",
@@ -92,7 +103,7 @@ class GesellschafterlisteParser:
     ]
 
     # Wörter die auf keine Person hindeuten
-    NON_PERSON_MARKERS = [
+    NON_PERSON_MARKERS: List[str] = [
         "Geschäftsanteil", "Stammkapital", "Nennbetrag", "laufende",
         "Nummer", "Betrag", "Liste", "Gesellschafter", "insgesamt",
         "Summe", "EUR", "Anteil", "Veränderung", "Amtsgericht",
@@ -105,12 +116,12 @@ class GesellschafterlisteParser:
     OCR_PATTERNS = {
         # Format: "Nachname Vorname DD.MM.YYYY Ort"
         "ocr_name_date_place": re.compile(
-            r"([A-ZÄÖÜ][a-zäöüß]+)\s+([A-ZÄÖÜ][a-zäöüß]+)\s+(\d{2}\.\d{2}\.\d{4})\s+([A-ZÄÖÜ][a-zäöüß]+)",
+            rf"({_GERMAN_NAME})\s+({_GERMAN_NAME})\s+({_DATE_FORMAT})\s+({_GERMAN_NAME})",
             re.MULTILINE
         ),
         # Format: "Nachname Vorname DD.MM.YYYY"
         "ocr_name_date": re.compile(
-            r"([A-ZÄÖÜ][a-zäöüß]+)\s+([A-ZÄÖÜ][a-zäöüß]+)\s+(\d{2}\.\d{2}\.\d{4})",
+            rf"({_GERMAN_NAME})\s+({_GERMAN_NAME})\s+({_DATE_FORMAT})",
             re.MULTILINE
         ),
     }
@@ -138,9 +149,9 @@ class GesellschafterlisteParser:
                 confidence=0.0
             )
 
-        shareholders = []
-        full_text = ""
-        file_ext = file_path.suffix.lower()
+        shareholders: List[Shareholder] = []
+        full_text: str = ""
+        file_ext: str = file_path.suffix.lower()
 
         try:
             # TIF/TIFF-Dateien mit OCR verarbeiten
@@ -180,8 +191,35 @@ class GesellschafterlisteParser:
                     confidence=0.0
                 )
 
+        except pdfplumber.pdfminer.pdfparser.PDFSyntaxError as e:
+            logger.error(f"PDF-Syntaxfehler beim Parsen: {e}")
+            return ParsingResult(
+                shareholders=[],
+                natural_persons_count=0,
+                legal_entities_count=0,
+                confidence=0.0,
+                raw_text=full_text
+            )
+        except pdfplumber.pdfminer.pdfdocument.PDFEncryptionError as e:
+            logger.error(f"PDF ist verschluesselt: {e}")
+            return ParsingResult(
+                shareholders=[],
+                natural_persons_count=0,
+                legal_entities_count=0,
+                confidence=0.0,
+                raw_text=full_text
+            )
+        except (IOError, OSError) as e:
+            logger.error(f"Dateizugriffsfehler: {e}")
+            return ParsingResult(
+                shareholders=[],
+                natural_persons_count=0,
+                legal_entities_count=0,
+                confidence=0.0,
+                raw_text=full_text
+            )
         except Exception as e:
-            logger.error(f"Fehler beim Parsen von {file_path}: {e}")
+            logger.error(f"Unerwarteter Fehler beim Parsen: {type(e).__name__}: {e}")
             return ParsingResult(
                 shareholders=[],
                 natural_persons_count=0,
@@ -202,8 +240,10 @@ class GesellschafterlisteParser:
 
         confidence = self._calculate_confidence(shareholders, full_text)
 
+        # PII sanitization: log hash instead of filename
+        file_hash = hashlib.sha256(file_path.name.encode()).hexdigest()[:8]
         logger.info(
-            f"Parsed {file_path.name}: {len(natural)} natürlich, "
+            f"Parsed [{file_hash}]: {len(natural)} natuerlich, "
             f"{len(legal)} juristisch, Konfidenz: {confidence:.2f}"
         )
 
@@ -240,7 +280,7 @@ class GesellschafterlisteParser:
 
             # OCR mit deutscher Sprache (falls verfügbar)
             # Tesseract-Konfiguration für bessere Erkennung
-            custom_config = r'--oem 3 --psm 6'
+            custom_config: str = r'--oem 3 --psm 6'
 
             try:
                 # Versuche zuerst mit Deutsch
@@ -266,21 +306,28 @@ class GesellschafterlisteParser:
             return ""
 
     def _parse_table(self, table: List[List]) -> List[Shareholder]:
-        """Extrahiert Gesellschafter aus Tabellen-Struktur."""
-        shareholders = []
+        """Extrahiert Gesellschafter aus Tabellen-Struktur.
+
+        Args:
+            table: Liste von Zeilen, wobei jede Zeile eine Liste von Zellwerten ist.
+
+        Returns:
+            Liste der extrahierten Shareholder-Objekte.
+        """
+        shareholders: List[Shareholder] = []
 
         if not table or len(table) < 2:
             return shareholders
 
-        headers = [str(h).lower() if h else "" for h in table[0]]
+        headers: List[str] = [str(h).lower() if h else "" for h in table[0]]
 
         # Header-Indizes finden
-        name_col = self._find_column_index(headers, [
+        name_col: Optional[int] = self._find_column_index(headers, [
             "name", "gesellschafter", "vor- und nachname", "nachname",
             "inhaber", "anteilsinhaber"
         ])
 
-        share_col = self._find_column_index(headers, [
+        share_col: Optional[int] = self._find_column_index(headers, [
             "anteil", "%", "geschäftsanteil", "nennbetrag", "betrag", "prozent"
         ])
 
@@ -299,7 +346,7 @@ class GesellschafterlisteParser:
             if not row or len(row) <= name_col:
                 continue
 
-            name = str(row[name_col]).strip() if row[name_col] else ""
+            name: str = str(row[name_col]).strip() if row[name_col] else ""
 
             # Leere oder ungültige Namen überspringen
             if not name or len(name) < 3:
@@ -309,7 +356,7 @@ class GesellschafterlisteParser:
             if any(marker.lower() in name.lower() for marker in self.NON_PERSON_MARKERS):
                 continue
 
-            share = None
+            share: Optional[float] = None
             if share_col is not None and len(row) > share_col and row[share_col]:
                 share = self._parse_share(str(row[share_col]))
 
@@ -321,25 +368,53 @@ class GesellschafterlisteParser:
 
         return shareholders
 
-    def _parse_with_patterns(self, text: str) -> List[Shareholder]:
-        """Regex-basierte Extraktion als Fallback."""
-        shareholders = []
+    def _extract_name_from_match(self, pattern_name: str, match: tuple) -> str:
+        """Extracts name from regex match based on pattern type.
 
-        # Standard-Patterns
-        for pattern_name, pattern in self.PATTERNS.items():
+        Args:
+            pattern_name: Name des Patterns (z.B. 'standard_birth', 'name_first').
+            match: Regex-Match-Tuple.
+
+        Returns:
+            Extrahierter Name als String.
+        """
+        if pattern_name == "standard_birth":
+            # Nachname, Vorname, Ort, Geburtsdatum -> "Vorname Nachname"
+            return f"{match[1]} {match[0]}"
+        elif pattern_name in ["name_first", "numbered_geb", "name_only"]:
+            return match[0] if isinstance(match, tuple) else match
+        elif pattern_name == "name_share":
+            return match[0]
+        elif pattern_name == "ocr_name_date_place":
+            # Nachname, Vorname, Datum, Ort -> "Vorname Nachname"
+            nachname, vorname, _datum, _ort = match
+            return f"{vorname} {nachname}"
+        elif pattern_name == "ocr_name_date":
+            # Nachname, Vorname, Datum -> "Vorname Nachname"
+            nachname, vorname, _datum = match
+            return f"{vorname} {nachname}"
+        else:
+            return match[0] if isinstance(match, tuple) else match
+
+    def _extract_matches(self, text: str, patterns: Dict[str, re.Pattern],
+                         source_prefix: str) -> List[Shareholder]:
+        """Generic pattern matcher for both standard and OCR patterns.
+
+        Args:
+            text: Der zu durchsuchende Text.
+            patterns: Dict von Pattern-Namen zu kompilierten Regex-Patterns.
+            source_prefix: Praefix fuer die Quellangabe (z.B. 'regex' oder 'ocr').
+
+        Returns:
+            Liste der extrahierten Shareholder-Objekte.
+        """
+        shareholders: List[Shareholder] = []
+
+        for pattern_name, pattern in patterns.items():
             matches = pattern.findall(text)
 
             for match in matches:
-                if pattern_name == "standard_birth":
-                    # Nachname, Vorname, Ort, Geburtsdatum
-                    name = f"{match[1]} {match[0]}"  # Vorname Nachname
-                elif pattern_name in ["name_first", "numbered_geb", "name_only"]:
-                    name = match[0] if isinstance(match, tuple) else match
-                elif pattern_name == "name_share":
-                    name = match[0]
-                else:
-                    name = match[0] if isinstance(match, tuple) else match
-
+                name = self._extract_name_from_match(pattern_name, match)
                 name = self._clean_name(name)
 
                 # Validierung
@@ -350,43 +425,40 @@ class GesellschafterlisteParser:
 
                 shareholders.append(Shareholder(
                     name=name,
-                    source=f"regex:{pattern_name}"
-                ))
-
-        # OCR-spezifische Patterns (für gescannte Dokumente)
-        for pattern_name, pattern in self.OCR_PATTERNS.items():
-            matches = pattern.findall(text)
-
-            for match in matches:
-                if pattern_name == "ocr_name_date_place":
-                    # Nachname, Vorname, Datum, Ort -> "Vorname Nachname"
-                    nachname, vorname, datum, ort = match
-                    name = f"{vorname} {nachname}"
-                elif pattern_name == "ocr_name_date":
-                    # Nachname, Vorname, Datum -> "Vorname Nachname"
-                    nachname, vorname, datum = match
-                    name = f"{vorname} {nachname}"
-                else:
-                    continue
-
-                name = self._clean_name(name)
-
-                # Validierung
-                if len(name) < 3:
-                    continue
-                if any(marker.lower() in name.lower() for marker in self.NON_PERSON_MARKERS):
-                    continue
-
-                shareholders.append(Shareholder(
-                    name=name,
-                    source=f"ocr:{pattern_name}"
+                    source=f"{source_prefix}:{pattern_name}"
                 ))
 
         return shareholders
 
+    def _parse_with_patterns(self, text: str) -> List[Shareholder]:
+        """Regex-basierte Extraktion als Fallback.
+
+        Args:
+            text: Der vollstaendige extrahierte Text des Dokuments.
+
+        Returns:
+            Liste der extrahierten Shareholder-Objekte.
+        """
+        shareholders: List[Shareholder] = []
+
+        # Standard-Patterns
+        shareholders.extend(self._extract_matches(text, self.PATTERNS, "regex"))
+
+        # OCR-spezifische Patterns (für gescannte Dokumente)
+        shareholders.extend(self._extract_matches(text, self.OCR_PATTERNS, "ocr"))
+
+        return shareholders
+
     def _is_natural_person(self, name: str) -> bool:
-        """Prüft ob Name eine natürliche Person ist."""
-        name_upper = name.upper()
+        """Prüft ob Name eine natürliche Person ist.
+
+        Args:
+            name: Der zu pruefende Name.
+
+        Returns:
+            True wenn natuerliche Person, False wenn juristische Person.
+        """
+        name_upper: str = name.upper()
 
         for marker in self.LEGAL_ENTITY_MARKERS:
             if marker.upper() in name_upper:
@@ -394,7 +466,7 @@ class GesellschafterlisteParser:
 
         # Zusätzliche Heuristiken
         # Natürliche Personen haben meist 2-4 Wörter
-        words = name.split()
+        words: List[str] = name.split()
         if len(words) > 5:
             return False
 
@@ -405,7 +477,14 @@ class GesellschafterlisteParser:
         return True
 
     def _parse_share(self, share_str: str) -> Optional[float]:
-        """Parst Anteil aus String (z.B. '50,00 %' -> 50.0)."""
+        """Parst Anteil aus String (z.B. '50,00 %' -> 50.0).
+
+        Args:
+            share_str: String mit Anteilsinformation.
+
+        Returns:
+            Prozentwert als Float oder None.
+        """
         if not share_str:
             return None
 
@@ -418,7 +497,7 @@ class GesellschafterlisteParser:
         match = re.search(r"([\d.]+(?:,\d+)?)\s*(?:EUR|€)", share_str)
         if match:
             # Deutsches Format: Punkt = Tausender, Komma = Dezimal
-            amount_str = match.group(1)
+            amount_str: str = match.group(1)
             # Tausenderpunkte entfernen, Komma zu Punkt
             amount_str = amount_str.replace(".", "").replace(",", ".")
             return float(amount_str)
@@ -426,14 +505,32 @@ class GesellschafterlisteParser:
         return None
 
     def _find_column_index(self, headers: List[str], search_terms: List[str]) -> Optional[int]:
-        """Findet Spaltenindex basierend auf Header-Namen."""
+        """Findet Spaltenindex basierend auf Header-Namen.
+
+        Args:
+            headers: Liste der Header-Strings (lowercase).
+            search_terms: Liste der Suchbegriffe.
+
+        Returns:
+            Index der gefundenen Spalte oder None.
+        """
         for i, header in enumerate(headers):
             if header and any(term in header for term in search_terms):
                 return i
         return None
 
     def _clean_name(self, name: str) -> str:
-        """Bereinigt Namen von Sonderzeichen und Whitespace."""
+        """Bereinigt Namen von Sonderzeichen und ueberfluessigem Whitespace.
+
+        Entfernt mehrfache Leerzeichen, fuehrende/trailing Whitespace
+        und abschliessende Kommas.
+
+        Args:
+            name: Der zu bereinigende Name.
+
+        Returns:
+            Bereinigter Name.
+        """
         # Mehrfache Leerzeichen entfernen
         name = re.sub(r'\s+', ' ', name)
         # Führende/trailing Whitespace
@@ -443,12 +540,19 @@ class GesellschafterlisteParser:
         return name
 
     def _deduplicate(self, shareholders: List[Shareholder]) -> List[Shareholder]:
-        """Entfernt Duplikate basierend auf normalisiertem Namen."""
-        seen = set()
-        unique = []
+        """Entfernt Duplikate basierend auf normalisiertem Namen.
+
+        Args:
+            shareholders: Liste der Shareholder-Objekte.
+
+        Returns:
+            Deduplizierte Liste.
+        """
+        seen: set = set()
+        unique: List[Shareholder] = []
 
         for sh in shareholders:
-            normalized = sh.name.lower().strip()
+            normalized: str = sh.name.lower().strip()
             if normalized not in seen:
                 seen.add(normalized)
                 unique.append(sh)
@@ -458,22 +562,28 @@ class GesellschafterlisteParser:
     def _calculate_confidence(self, shareholders: List[Shareholder], full_text: str) -> float:
         """
         Berechnet Konfidenz des Parsings.
-        1.0 = sehr sicher, 0.0 = unsicher
+
+        Args:
+            shareholders: Liste der extrahierten Gesellschafter.
+            full_text: Vollstaendiger Text des Dokuments.
+
+        Returns:
+            Konfidenzwert zwischen 0.0 (unsicher) und 1.0 (sehr sicher).
         """
         if not shareholders:
             return 0.0
 
-        score = 0.0
+        score: float = 0.0
 
         # Faktor 1: Quelle (Tabelle > Regex)
-        table_sources = sum(1 for s in shareholders if s.source == "table")
+        table_sources: int = sum(1 for s in shareholders if s.source == "table")
         if table_sources > 0:
             score += 0.3
         elif any("regex" in s.source for s in shareholders):
             score += 0.15
 
         # Faktor 2: Anteile gefunden
-        has_shares = sum(1 for s in shareholders if s.share_percent is not None)
+        has_shares: int = sum(1 for s in shareholders if s.share_percent is not None)
         if has_shares > 0:
             score += 0.2
 
