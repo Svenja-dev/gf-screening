@@ -23,6 +23,8 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+import pdfplumber
+
 from tqdm import tqdm
 
 from models import Database, Company, Shareholder
@@ -43,12 +45,14 @@ logger = logging.getLogger(__name__)
 
 class GFScreeningPipeline:
     """
-    Hauptpipeline für GF-Screening.
+    Hauptpipeline fuer GF-Screening.
 
     Orchestriert Import, Download, Parsing und Export.
+    Verarbeitet Dealfront-Exporte (CSV/Excel) und steuert den gesamten
+    Workflow von der Firmenerfassung bis zum qualifizierten Lead-Export.
     """
 
-    def __init__(self, base_dir: Path = None):
+    def __init__(self, base_dir: Optional[Path] = None) -> None:
         """
         Initialisiert die Pipeline.
 
@@ -67,17 +71,21 @@ class GFScreeningPipeline:
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def import_file(self, file_path: str, delimiter: str = ';'):
+    def import_file(self, file_path: str, delimiter: str = ';') -> None:
         """
         Importiert Dealfront-Export (CSV oder Excel) in die Datenbank.
 
-        Unterstützte Spalten (Dealfront-Format):
+        Unterstuetzte Spalten (Dealfront-Format):
         - Company Name: Firmenname
         - Register Number: Registernummer (HRB12345, HRB 12345 B, etc.)
         - District Court: Registergericht
         - Location: Ort
-        - Legal Form: Rechtsform (für Filter)
+        - Legal Form: Rechtsform (fuer Filter)
         - ID: Dealfront-ID
+
+        Args:
+            file_path: Pfad zur Import-Datei (CSV oder Excel).
+            delimiter: CSV-Delimiter (default: ';').
         """
         file_path = Path(file_path)
 
@@ -96,9 +104,30 @@ class GFScreeningPipeline:
         else:
             self._import_csv(file_path, delimiter)
 
-    def _import_excel(self, excel_path: Path):
-        """Importiert Excel-Datei (Dealfront-Format)."""
-        df = pd.read_excel(excel_path)
+    def _import_excel(self, excel_path: Path) -> None:
+        """
+        Importiert Excel-Datei (Dealfront-Format).
+
+        Liest alle Zeilen aus dem Excel-Sheet, parst Firmendaten inkl.
+        Registernummer und fuegt sie in die Datenbank ein.
+
+        Args:
+            excel_path: Pfad zur Excel-Datei.
+        """
+        try:
+            df = pd.read_excel(excel_path)
+        except FileNotFoundError:
+            logger.error(f"Excel-Datei nicht gefunden: {excel_path}")
+            return
+        except ValueError as e:
+            logger.error(f"Excel-Datei hat ungueltiges Format: {excel_path} - {type(e).__name__}")
+            return
+        except PermissionError:
+            logger.error(f"Keine Leseberechtigung fuer Excel-Datei: {excel_path}")
+            return
+        except Exception as e:
+            logger.error(f"Fehler beim Lesen der Excel-Datei: {excel_path} - {type(e).__name__}")
+            return
 
         logger.info(f"Excel geladen: {len(df)} Zeilen, {len(df.columns)} Spalten")
 
@@ -134,13 +163,8 @@ class GFScreeningPipeline:
             if dealfront_id == 'nan':
                 dealfront_id = name
 
-            # Rechtsform (optional für Filter)
+            # Rechtsform (optional fuer Filter)
             legal_form = str(row.get('Legal Form', '')).strip()
-
-            # Nur GmbHs importieren? (Optional)
-            # if 'GmbH' not in legal_form:
-            #     skipped += 1
-            #     continue
 
             company = Company(
                 dealfront_id=dealfront_id,
@@ -154,7 +178,7 @@ class GFScreeningPipeline:
             self.db.insert_company(company)
             imported += 1
 
-        logger.info(f"Import abgeschlossen: {imported} importiert, {skipped} übersprungen")
+        logger.info(f"Import abgeschlossen: {imported} importiert, {skipped} uebersprungen")
 
         # Statistiken
         stats = self.db.get_stats()
@@ -167,84 +191,119 @@ class GFScreeningPipeline:
         if missing_register > 0:
             logger.warning(f"{missing_register} Firmen ohne Registernummer!")
 
-    def _import_csv(self, csv_path: Path, delimiter: str = ';'):
-        """Importiert CSV-Datei."""
+    def _import_csv(self, csv_path: Path, delimiter: str = ';') -> None:
+        """
+        Importiert CSV-Datei (Dealfront-Format).
+
+        Erkennt den Delimiter automatisch falls der angegebene nicht vorkommt.
+        Mappt Spaltennamen case-insensitive auf die erwarteten Felder.
+
+        Args:
+            csv_path: Pfad zur CSV-Datei.
+            delimiter: CSV-Delimiter (default: ';').
+        """
         imported = 0
         skipped = 0
 
-        with open(csv_path, encoding='utf-8-sig') as f:
-            # Delimiter erkennen
-            sample = f.read(1024)
-            f.seek(0)
+        try:
+            with open(csv_path, encoding='utf-8-sig') as f:
+                # Delimiter erkennen
+                sample = f.read(1024)
+                f.seek(0)
 
-            if delimiter not in sample:
-                delimiter = ',' if ',' in sample else '\t'
+                if delimiter not in sample:
+                    delimiter = ',' if ',' in sample else '\t'
 
-            reader = csv.DictReader(f, delimiter=delimiter)
-            fieldnames = {fn.lower().strip(): fn for fn in reader.fieldnames}
+                reader = csv.DictReader(f, delimiter=delimiter)
+                fieldnames = {fn.lower().strip(): fn for fn in reader.fieldnames}
 
-            for row in reader:
-                name = self._get_field(row, fieldnames, [
-                    'firma', 'firmenname', 'name', 'company', 'company name'
-                ])
+                for row in reader:
+                    name = self._get_field(row, fieldnames, [
+                        'firma', 'firmenname', 'name', 'company', 'company name'
+                    ])
 
-                if not name:
-                    skipped += 1
-                    continue
+                    if not name:
+                        skipped += 1
+                        continue
 
-                city = self._get_field(row, fieldnames, [
-                    'ort', 'stadt', 'city', 'location'
-                ]) or ""
+                    city = self._get_field(row, fieldnames, [
+                        'ort', 'stadt', 'city', 'location'
+                    ]) or ""
 
-                court = self._get_field(row, fieldnames, [
-                    'district court', 'registergericht', 'gericht', 'court'
-                ]) or ""
+                    court = self._get_field(row, fieldnames, [
+                        'district court', 'registergericht', 'gericht', 'court'
+                    ]) or ""
 
-                register_raw = self._get_field(row, fieldnames, [
-                    'registernummer', 'register number', 'hrb', 'hra'
-                ]) or ""
+                    register_raw = self._get_field(row, fieldnames, [
+                        'registernummer', 'register number', 'hrb', 'hra'
+                    ]) or ""
 
-                reg_type, reg_num, parsed_court = self._parse_register_field(register_raw, city)
+                    reg_type, reg_num, parsed_court = self._parse_register_field(register_raw, city)
 
-                if not court:
-                    court = parsed_court
+                    if not court:
+                        court = parsed_court
 
-                dealfront_id = self._get_field(row, fieldnames, [
-                    'id', 'dealfront_id', 'company_id'
-                ]) or name
+                    dealfront_id = self._get_field(row, fieldnames, [
+                        'id', 'dealfront_id', 'company_id'
+                    ]) or name
 
-                company = Company(
-                    dealfront_id=dealfront_id,
-                    name=name.strip(),
-                    city=city.strip(),
-                    court=court,
-                    register_type=reg_type,
-                    register_num=f"{reg_type} {reg_num}".strip() if reg_type and reg_num else ""
-                )
+                    company = Company(
+                        dealfront_id=dealfront_id,
+                        name=name.strip(),
+                        city=city.strip(),
+                        court=court,
+                        register_type=reg_type,
+                        register_num=f"{reg_type} {reg_num}".strip() if reg_type and reg_num else ""
+                    )
 
-                self.db.insert_company(company)
-                imported += 1
+                    self.db.insert_company(company)
+                    imported += 1
 
-        logger.info(f"Import abgeschlossen: {imported} importiert, {skipped} übersprungen")
+        except FileNotFoundError:
+            logger.error(f"CSV-Datei nicht gefunden: {csv_path}")
+            return
+        except UnicodeDecodeError:
+            logger.error(f"CSV-Datei hat falsches Encoding: {csv_path}")
+            return
+        except PermissionError:
+            logger.error(f"Keine Leseberechtigung: {csv_path}")
+            return
 
-    # Alias für Abwärtskompatibilität
-    def import_csv(self, csv_path: str, delimiter: str = ';'):
-        """Alias für import_file (Abwärtskompatibilität)."""
+        logger.info(f"Import abgeschlossen: {imported} importiert, {skipped} uebersprungen")
+
+    def import_csv(self, csv_path: str, delimiter: str = ';') -> None:
+        """
+        Alias fuer import_file (Abwaertskompatibilitaet).
+
+        Delegiert vollstaendig an import_file. Bestehendes Verhalten
+        bleibt erhalten, aber ohne duplizierte Statistik-Logik.
+
+        Args:
+            csv_path: Pfad zur CSV-Datei.
+            delimiter: CSV-Delimiter (default: ';').
+        """
         self.import_file(csv_path, delimiter)
 
-        # Statistiken anzeigen
-        stats = self.db.get_stats()
-        logger.info(f"Datenbank-Status: {stats['total']} Firmen gesamt")
+    def _get_field(
+        self, row: dict, fieldnames: dict, candidates: list[str]
+    ) -> Optional[str]:
+        """
+        Findet Feldwert basierend auf verschiedenen Spaltennamen.
 
-        missing_register = self.db.conn.execute(
-            "SELECT COUNT(*) FROM companies WHERE register_num IS NULL OR register_num = ''"
-        ).fetchone()[0]
+        Durchsucht die Kandidaten-Liste case-insensitive und gibt den
+        ersten gefundenen nicht-leeren Wert zurueck.
 
-        if missing_register > 0:
-            logger.warning(f"{missing_register} Firmen ohne Registernummer!")
+        Args:
+            row: Zeile als Dictionary (aus csv.DictReader).
+            fieldnames: Mapping von lowercase-Feldnamen zu Original-Namen.
+            candidates: Liste moeglicher Spaltennamen (lowercase).
 
-    def _get_field(self, row: dict, fieldnames: dict, candidates: list) -> Optional[str]:
-        """Findet Feldwert basierend auf verschiedenen Spaltennamen."""
+        Returns:
+            Der gefundene Feldwert oder None.
+        """
+        if not isinstance(fieldnames, dict) or not isinstance(row, dict):
+            return None
+
         for candidate in candidates:
             if candidate in fieldnames:
                 original_name = fieldnames[candidate]
@@ -253,23 +312,30 @@ class GFScreeningPipeline:
                     return value.strip()
         return None
 
-    def _parse_register_field(self, register_raw: str, city: str) -> tuple:
+    def _parse_register_field(self, register_raw: str, city: str) -> tuple[str, str, str]:
         """
         Parst Registernummer aus verschiedenen Formaten.
 
-        Unterstützte Formate:
+        Unterstuetzte Formate:
         - "HRB 12345"
         - "HRB 12345 B"
         - "12345" (nur Nummer, dann HRB annehmen)
         - "Amtsgericht Berlin HRB 12345"
         - "Berlin, HRB 12345"
+
+        Args:
+            register_raw: Rohe Registernummer-Zeichenkette.
+            city: Stadt fuer Gericht-Fallback.
+
+        Returns:
+            Tuple aus (register_type, register_number, court).
         """
         if not register_raw:
             return "", "", ""
 
         register_raw = register_raw.strip().upper()
 
-        # Pattern 1: Vollständig mit Gericht
+        # Pattern 1: Vollstaendig mit Gericht
         match = re.search(
             r"(?:AMTSGERICHT\s+)?(\w+)[\s,]+?(HRB|HRA|GNR|VR|PR)\s*(\d+)\s*([A-Z])?",
             register_raw
@@ -302,7 +368,18 @@ class GFScreeningPipeline:
         return "", "", ""
 
     def _city_to_court(self, city: str) -> str:
-        """Leitet Registergericht aus Stadt ab (vereinfacht)."""
+        """
+        Leitet Registergericht aus Stadt ab (vereinfacht).
+
+        Verwendet ein statisches Mapping der groessten deutschen Staedte
+        zu ihren Registergerichten.
+
+        Args:
+            city: Stadtname.
+
+        Returns:
+            Name des Registergerichts oder die Stadt selbst als Fallback.
+        """
         if not city:
             return ""
 
@@ -335,13 +412,16 @@ class GFScreeningPipeline:
 
         return city  # Fallback: Stadt als Gericht verwenden
 
-    def run_downloads(self, limit: int = None, resume: bool = True):
+    def run_downloads(self, limit: Optional[int] = None, resume: bool = True) -> None:
         """
-        Lädt Gesellschafterlisten herunter.
+        Laedt Gesellschafterlisten herunter.
+
+        Holt ausstehende Firmen aus der Datenbank und startet den
+        Selenium-basierten Download von handelsregister.de.
 
         Args:
-            limit: Maximale Anzahl Downloads (None = alle)
-            resume: Bei vorherigen Downloads fortfahren
+            limit: Maximale Anzahl Downloads (None = alle).
+            resume: Bei vorherigen Downloads fortfahren.
         """
         companies = self.db.get_pending_downloads(limit)
 
@@ -349,8 +429,8 @@ class GFScreeningPipeline:
             logger.info("Keine ausstehenden Downloads")
             return
 
-        logger.info(f"Starte Download für {len(companies)} Firmen...")
-        logger.info(f"Geschätzte Zeit: {len(companies) * 65 / 3600:.1f} Stunden")
+        logger.info(f"Starte Download fuer {len(companies)} Firmen...")
+        logger.info(f"Geschaetzte Zeit: {len(companies) * 65 / 3600:.1f} Stunden")
 
         downloader = GesellschafterlistenDownloader(self.pdf_dir, headless=True)
 
@@ -376,7 +456,7 @@ class GFScreeningPipeline:
                         if result.no_gl_available:
                             self.db.log_event(
                                 company.id, "download", "no_gl",
-                                "Keine Gesellschafterliste verfügbar"
+                                "Keine Gesellschafterliste verfuegbar"
                             )
                         else:
                             self.db.log_event(company.id, "download", "success")
@@ -396,12 +476,15 @@ class GFScreeningPipeline:
         logger.info(f"Download-Status: {stats['downloaded']}/{stats['total']} abgeschlossen")
         logger.info(f"Ohne Gesellschafterliste: {stats['no_gl']}")
 
-    def run_parsing(self, limit: int = None):
+    def run_parsing(self, limit: Optional[int] = None) -> None:
         """
-        Parst heruntergeladene PDFs.
+        Parst heruntergeladene PDFs und extrahiert Gesellschafterstrukturen.
+
+        Unterscheidet zwischen PDF-spezifischen Fehlern (pdfplumber),
+        Datei-Fehlern und allgemeinen Fehlern fuer besseres Debugging.
 
         Args:
-            limit: Maximale Anzahl zu parsender PDFs
+            limit: Maximale Anzahl zu parsender PDFs.
         """
         companies = self.db.get_pending_parsing(limit)
 
@@ -423,7 +506,7 @@ class GFScreeningPipeline:
                 pdf_path = Path(company.pdf_path)
 
                 if not pdf_path.exists():
-                    logger.warning(f"PDF nicht gefunden: {pdf_path}")
+                    logger.warning(f"PDF nicht gefunden fuer Firma ID {company.id}")
                     error_count += 1
                     continue
 
@@ -454,19 +537,38 @@ class GFScreeningPipeline:
 
                     self.db.log_event(company.id, "parse", "success")
 
+                except pdfplumber.pdfminer.pdfparser.PDFSyntaxError as e:
+                    logger.error(
+                        f"PDF-Syntax-Fehler fuer Firma ID {company.id}: {type(e).__name__}"
+                    )
+                    self.db.log_event(company.id, "parse", "error", f"PDF-Syntax: {type(e).__name__}")
+                    error_count += 1
+
+                except (FileNotFoundError, PermissionError, OSError) as e:
+                    logger.error(
+                        f"Datei-Fehler fuer Firma ID {company.id}: {type(e).__name__}"
+                    )
+                    self.db.log_event(company.id, "parse", "error", f"Datei: {type(e).__name__}")
+                    error_count += 1
+
                 except Exception as e:
-                    logger.error(f"Parsing-Fehler für {company.name}: {e}")
-                    self.db.log_event(company.id, "parse", "error", str(e))
+                    logger.error(
+                        f"Parsing-Fehler fuer Firma ID {company.id}: {type(e).__name__}"
+                    )
+                    self.db.log_event(company.id, "parse", "error", type(e).__name__)
                     error_count += 1
 
         logger.info(f"Parsing abgeschlossen: {qualified_count} qualifiziert, {error_count} Fehler")
 
-    def export(self, output_name: str = None):
+    def export(self, output_name: Optional[str] = None) -> Path:
         """
         Exportiert qualifizierte Leads als CSV.
 
         Args:
-            output_name: Dateiname (default: qualified_leads_TIMESTAMP.csv)
+            output_name: Dateiname (default: qualified_leads_TIMESTAMP.csv).
+
+        Returns:
+            Pfad zur erzeugten CSV-Datei.
         """
         if output_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -478,8 +580,8 @@ class GFScreeningPipeline:
         logger.info(f"Exportiert: {count} qualifizierte Leads nach {output_path}")
         return output_path
 
-    def show_stats(self):
-        """Zeigt aktuelle Pipeline-Statistiken."""
+    def show_stats(self) -> None:
+        """Zeigt aktuelle Pipeline-Statistiken auf der Konsole."""
         stats = self.db.get_stats()
 
         print("\n" + "=" * 50)
@@ -492,24 +594,24 @@ class GFScreeningPipeline:
         print(f"Ohne Gesellschafterliste: {stats['no_gl']:>6}")
         print("=" * 50)
 
-        # Verbleibende Zeit schätzen
+        # Verbleibende Zeit schaetzen
         pending = stats['total'] - stats['downloaded']
         if pending > 0:
             hours = pending * 65 / 3600
-            print(f"\nGeschätzte Restzeit Download: {hours:.1f} Stunden ({hours/24:.1f} Tage)")
+            print(f"\nGeschaetzte Restzeit Download: {hours:.1f} Stunden ({hours/24:.1f} Tage)")
 
-    def close(self):
-        """Schließt Datenbankverbindung."""
+    def close(self) -> None:
+        """Schliesst Datenbankverbindung."""
         self.db.close()
 
 
-def main():
-    """CLI-Entrypoint."""
+def main() -> None:
+    """CLI-Entrypoint fuer die GF-Screening Pipeline."""
     parser = argparse.ArgumentParser(
         description="GF-Screening Pipeline - Gesellschafterstruktur analysieren"
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="Verfügbare Befehle")
+    subparsers = parser.add_subparsers(dest="command", help="Verfuegbare Befehle")
 
     # Import
     import_parser = subparsers.add_parser("import", help="Dealfront-Export importieren (CSV oder Excel)")
@@ -532,7 +634,7 @@ def main():
     subparsers.add_parser("stats", help="Pipeline-Statistiken anzeigen")
 
     # Run all
-    run_parser = subparsers.add_parser("run", help="Komplette Pipeline ausführen")
+    run_parser = subparsers.add_parser("run", help="Komplette Pipeline ausfuehren")
     run_parser.add_argument("file_path", help="Pfad zur CSV- oder Excel-Datei")
     run_parser.add_argument("--limit", type=int, help="Max. Anzahl zu verarbeitender Firmen")
 
@@ -569,6 +671,11 @@ def main():
             pipeline.run_parsing()
             pipeline.export()
             pipeline.show_stats()
+
+    except Exception as e:
+        logger.error(f"Pipeline-Fehler: {e}")
+        pipeline.db.conn.rollback()
+        raise
 
     finally:
         pipeline.close()

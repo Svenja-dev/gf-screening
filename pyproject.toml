@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "gf-screening"
+version = "1.1.0"
+description = "Automatisierte Analyse von GmbH-Gesellschafterstrukturen aus Dealfront-Listen"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Lara Knuth", email = "lara.knuth@gmail.com"},
+]
+dependencies = [
+    "selenium==4.27.1",
+    "webdriver-manager==4.0.2",
+    "pdfplumber==0.11.4",
+    "requests==2.32.3",
+    "python-dotenv==1.0.1",
+    "tqdm==4.67.1",
+    "pandas==2.2.3",
+    "openpyxl==3.1.5",
+    "typing-extensions==4.12.2",
+    "pytesseract==0.3.13",
+    "Pillow==11.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.14",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "debug_*", "test_download.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 35

@@ -4,14 +4,23 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
+dist/
+build/
 
 # Data files (contain potentially sensitive company data)
 data/*.db
 data/*.sqlite
+data/rate_limit_state.json
 pdfs/
+
+# Export files (may contain PII)
+output/*.csv
+output/*.aes
 
 # Debug files
 debug/
+debug*.png
+debug_screenshot.png
 
 # IDE
 .idea/
@@ -21,6 +30,7 @@ debug/
 # Environment
 .env
 .env.local
+.env.*
 
 # OS
 .DS_Store
@@ -29,6 +39,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Debug screenshots (may contain sensitive company data)
-debug*.png
-debug_screenshot.png
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Backup files
+*.bak
+*.backup
+*~
